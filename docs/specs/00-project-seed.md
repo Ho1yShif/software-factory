@@ -196,11 +196,15 @@ The subsections are numbered for stable cross-referencing, not grouped by layer.
 ```ts
 interface AgentDefinition {
   name: string;
+  /** Short description of the agent's purpose. Used as the tool description when this agent is exposed as a subagent (§5.24). Falls back to `name` if absent. */
+  description?: string;
   /** Author-declared version string. Metadata only — no selection/resolution logic. Recorded on agent spans and run records for audit/repro ("which version produced this?"). */
   version?: string;
   model: ModelSpec;
   systemPrompt: string;
   tools: string[];
+  /** Agents this agent may spawn as subagents (resolved against the AgentSet). Exposed to the model as `subagents__<name>` tools (§5.24). */
+  subagents?: string[];
   skills?: SkillMetadata[];
   sampling?: SamplingParams;
   budget?: Budget;
@@ -569,6 +573,8 @@ interface RunContext {
   readonly parentSpanId?: string;
   /** The user this run belongs to (from the gateway's auth). Undefined for system/cron runs. Used to resolve per-user OAuth in ToolContext. */
   readonly userId?: string;
+  /** Delegation depth: 0 for a root run, +1 per subagent level (§5.24). Used to enforce maxDepth. */
+  readonly depth: number;
   env(name: string): string | undefined;
 
   mountTools(toolIds: string[]): Promise<MountedTools>;
@@ -1131,6 +1137,8 @@ interface DispatchOptions {
   parentSpanId?: string;
   /** Propagated to the child run so it shares the caller's user/OAuth identity. */
   userId?: string;
+  /** Delegation depth for the child run (parent depth + 1 when spawned as a subagent; §5.24). */
+  depth?: number;
   /** Deterministic key — SHA-256(runId + agentName + callSeq) — for idempotent re-dispatch (§8.6). */
   idempotencyKey: string;
   plan?: RenderPlan;
@@ -1155,6 +1163,15 @@ interface CreateRuntimeOptions {
   runners?: RunnerRegistry;
   /** Override the auto-wired Render Workflows dispatcher (§8.6). */
   dispatcher?: TaskDispatcher;
+  /** Subagent delegation limits (§5.24). Also configurable via env. */
+  delegation?: Partial<DelegationLimits>;
+}
+
+interface DelegationLimits {
+  /** Max delegation nesting depth (root = 0). Default 5. */
+  maxDepth: number;
+  /** Max total subagent spawns per root run tree. Default 50. */
+  maxFanout: number;
 }
 ```
 
@@ -1170,6 +1187,33 @@ interface CreateRuntimeOptions {
 | Model client | Provider inferred from the agent's `model` (or its `apiKeyEnv`) |
 | Runner registry | `default` → `DefaultRunner`, plus adapters in `runners/` |
 | Dispatcher | Render Workflows dispatcher when `RENDER_SDK_SOCKET_PATH` / `RENDER_USE_LOCAL_DEV` present; otherwise in-process fallback (`.task()` runs as `.run()`) |
+
+### 5.24 Subagents (model-driven delegation)
+
+Static multi-agent composition happens in the workflow handler (`ctx.agents.get(...).task()`). **Subagents** add *dynamic* composition: an agent declares which agents it may delegate to, and those are exposed to the model as tools it can call mid-loop. This is a built-in tool source backed by the runtime's dispatcher — it reuses `agent.task()` (§8.6), tool idempotency, permissions/HITL, and tracing.
+
+**Declaration.** An agent lists spawnable agents in frontmatter:
+
+```yaml
+subagents: [researcher, summarizer]
+```
+
+**Surface.** Each declared subagent becomes one resolved tool, `subagents__<name>`, whose description is the subagent's `description` (falling back to its name). The model calls it like any tool; input is the subagent's `AgentInput`. The tool returns the subagent's `AgentOutput` (text + structured `data` when the subagent declares an `output` schema) as the `tool_result`.
+
+```ts
+// Model-facing tools generated for the agent above:
+//   subagents__researcher  — "Researches a topic and returns sources"
+//   subagents__summarizer  — "Summarizes provided text"
+```
+
+**Execution.** Subagents run as **isolated tasks** by default (`agent.task()`): a chained Render Workflows run nested under the calling agent. Spans nest naturally — calling agent → `subagents__researcher` tool span → subagent agent span — so the trace tree shows the full delegation hierarchy. `userId` propagates to the subagent; cost rolls up into the root run's `totalCostUsd`.
+
+**Safety limits** (`DelegationLimits`, configured via `createRuntime({ delegation })` or env):
+
+- `maxDepth` (default 5) — a spawned subagent's run `depth` is its parent's `depth + 1`; a spawn that would exceed `maxDepth` returns an **error `tool_result`** (the model sees it; the loop doesn't crash).
+- `maxFanout` (default 50) — total subagent spawns across the whole root run tree; exceeding it returns an error `tool_result`.
+
+Because spawning is just a tool call, it inherits idempotency (keyed on `toolCallId`, so resumes don't re-spawn), permission gating (`requireApproval: [subagents__researcher]`), and input validation.
 
 ---
 
@@ -1212,7 +1256,9 @@ You are a security reviewer. Given a set of file patches, analyze each for...
 |---|---|---|---|
 | `model` | `string` (tier name or model id) | `"medium"` | Load time |
 | `provider` | `"anthropic" \| "openai"` | Inferred from model | Load time |
+| `description` | `string` | (none) | Load time |
 | `tools` | `string[]` | `[]` | Load time (source ids or `sourceId__toolName`) |
+| `subagents` | `string[]` | `[]` | Load time (resolved against the AgentSet) |
 | `skills` | `string[]` | `[]` | Load time (resolved against `skills/`) |
 | `permissions.requireApproval` | `string[]` | `[]` | Load time |
 | `output` | JSON Schema (object) | (none — text only) | Load time (valid JSON Schema) |
@@ -1291,6 +1337,7 @@ This is the canonical list of hard errors raised at `loadAgents()` time. Other s
 - Model tier or model string not recognized
 - `plan` not a known `RenderPlan` slug
 - `output` is not a valid JSON Schema
+- `subagents` references an agent not in the AgentSet, or an agent lists itself as its own subagent
 - Runner name not found in `runners/` or not `"default"`
 - `requireApproval` references a name not in the agent's **expanded tool set** (see §6.2 for how source ids expand to resolved model-facing names)
 - Budget values are non-positive (except `maxCostUsd`, which accepts `null` or `0` to explicitly disable the cost ceiling)
@@ -1641,6 +1688,16 @@ workflow run (trace root)
 ├── agent: judge (in-process)
 │   └── llm: turn 0 (final)
 └── step: postReview (deterministic)
+```
+
+**Subagents** (§5.24) nest the same way: a `subagents__<name>` call is a `tool` span, and the spawned subagent's `agent` span is its child, so the full delegation hierarchy is visible:
+
+```
+agent: planner (task)
+└── llm: turn 1
+    └── tool: subagents__researcher
+        └── agent: researcher (task)      ← depth + 1
+            └── llm: turn 0 (final)
 ```
 
 ### 9.2 Span attributes
