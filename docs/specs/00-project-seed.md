@@ -2096,62 +2096,12 @@ This avoids a dedicated config file that duplicates things already expressed in 
 | Zero external dependencies for observability | Postgres is sufficient |
 | Package size (`@render-agents/sdk`) | < 100KB minified |
 
----
-
-## 14. Sprint Roadmap
-
-This spec is implemented across focused sprints. Each sprint has its own spec that references this document for contracts and data models.
-
-| Sprint | Spec | Scope | Depends on |
-|---|---|---|---|
-| 01 | `01-kernel.md` | Package scaffolding, `createRuntime`, `loadAgents`, `defineTool`, `defineMcpSource`, default runner (+ retry, input validation, structured output, skill loading via `load_skill`), `agent.run()`, local dev CLI, in-memory store, testing utilities (`/testing`) | — |
-| 02 | `02-workflows.md` | `agent.task()` auto-wired to Render Workflows (plan-tier dispatch), `workflow()` helper, `ctx.step` memoization, handler determinism, retries | 01 |
-| 03 | `03-observability.md` | OTel spans, Postgres store, tracer, span retention, trace UI | 01, 02 |
-| 04 | `04-gateway.md` | Web gateway, webhook discovery, SSE streaming, runs API | 02, 03 |
-| 05 | `05-sessions-hitl.md` | Sessions, conversations, HITL approval enforcement, multi-turn | 04 |
-| 06 | `06-oauth-multitenancy.md` | Per-user OAuth, multi-tenant isolation, budget enforcement | 05 |
-| 07 | `07-scaffolder.md` | `create-render-agent`, templates, Deploy-to-Render blueprints | 01–06 |
 
 ---
 
-## 15. Decision Log
+## Future Considerations
 
-Resolved design decisions and their rationale. Sprint specs reference these by number. The "Decision" column records the choice and the one-line *why*; mechanics live in the linked section, not here. All entries below are **resolved** — there are no open items.
-
-| # | Question | Options | Decision |
-|---|---|---|---|
-| 1 | `_shared.md` merge strategy | (a) Prepend body (b) Append body (c) Named sections | (a) Prepend (§6.4) |
-| 2 | Ship model tier aliases? | (a) Yes: small/medium/large (b) Require explicit model strings | (a) Yes (§6.3) |
-| 3 | Parallel tool dispatch in default runner | (a) Sprint 01 (b) Defer to later sprint | (a) Sprint 01 |
-| 4 | Project config file | (a) Dedicated file (b) `package.json` field (c) No config file | (c) No config file (§12.3) |
-| 5 | MCP tool namespacing | (a) `sourceId__toolName` for multi-tool (b) Flat for single-tool (c) Configurable | (a+b) Namespace multi-tool, flat single-tool (§5.6) |
-| 6 | Frontmatter validation library | (a) Zod (b) Custom (c) JSON Schema | (a) Zod |
-| 7 | Gateway framework | (a) Hono (b) Express (c) Fastify | (a) Hono — matches template |
-| 8 | Cancel store backend | (a) Render KV only (b) Postgres flag fallback (c) Both with auto-detect | (b) Postgres only — 5-10ms between LLM calls is noise (§5.19) |
-| 9 | Default `maxCostUsd` | (a) $10 per harness (b) $5 (c) No default (explicit only) | (a) $10 — matches harness (§5.20) |
-| 10 | Connector webhooks namespace | (a) `/connectors/:key` separate from `/webhooks/:name` (b) Merged under `/webhooks/` | (a) Separate — avoids collisions (§5.22) |
-| 11 | Schedule backend | (a) Render Cron in render.yaml (b) Runtime API (c) pg-boss cron | (a) Static Render Cron for MVP; defer runtime schedules (§5.21) |
-| 12 | Operator UI in MVP? | (a) Dev-mode trace UI only (from template) (b) Port harness operator UI (c) Defer entirely | (a) Trace UI only — lightweight, solves debugging |
-| 13 | `workflow()` naming | (a) Keep `workflow()` (b) `pipeline()` (c) `defineWorkflow()` (d) Bare export, no helper | (a) Keep — carries config, matches directory/route naming |
-| 14 | Runtime / composition root | (a) `createRuntime()` + `loadAgents(dir, runtime)` (b) global `configure()` (c) call-time deps | (a) Env-auto-detected `AgentRuntime` (§5.23) |
-| 15 | `agent.task()` compute model | (a) `cpu`/`memory` + per-run override (b) optional `plan` enum, no override | (b) Optional `plan`, no per-run override (§8.6) |
-| 16 | Task dispatch wiring | (a) user writes `task()` (b) auto-wired plan-tier dispatch tasks | (b) Auto-wired `agent@<plan>` tasks (§8.6) |
-| 17 | Workflow handler durability | (a) Render retries whole handler (b) `retries=0` + `ctx.step` memo + child-task durability | (b) `retries=0` + `ctx.step` memo (§8.7) |
-| 18 | HITL pause representation | (a) binary `ApprovalResult` (b) thrown `RunPaused` + `ApprovalResult` pending + `PausedResult` | (b) Throw + inspectable boundary result (§5.1, §8.7) |
-
----
-
-## 16. Code Provenance — Lift-and-Shift Map
-
-The lift-and-shift map (which existing `render-agent-harness` / `agent-workflows-template` modules to port, adapt, or drop, and the porting principles) is implementation guidance, not a contract, so it lives in a companion document: [`porting-map.md`](./porting-map.md).
-
----
-
-## 17. Future Considerations
-
-Forward-looking extensions that are **not in MVP scope** but whose seams we want to preserve so we don't paint ourselves into a corner. These define extension points and park open questions; they are not yet binding contracts.
-
-### 17.1 Sandboxes (code execution & development)
+### Sandboxes (code execution & development)
 
 [Render Sandboxes](https://render.com/) (forthcoming) are isolated, long-lived execution environments for code generation, testing, and interactive development. The goal is to let an agent check out a repo, run commands, start servers, and iterate — locally identical to production.
 
