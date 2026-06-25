@@ -1317,86 +1317,16 @@ export function workflow(
 export function defineTool(spec: DefineToolSpec): ToolSource;
 export function defineMcpSource(spec: DefineMcpSpec): ToolSource;
 
-// All types (re-exported)
-export type {
-  Agent,
-  AgentDefinition,
-  AgentInput,
-  AgentOutput,
-  AgentResult,
-  AgentRunner,
-  AgentRuntime,
-  AgentSet,
-  ApprovalResult,
-  Budget,
-  CancelStore,
-  CompleteArgs,
-  CompleteResult,
-  ConnectorContext,
-  ConnectorSpec,
-  ContentBlock,
-  CreateRuntimeOptions,
-  DefineToolSpec,
-  DefineMcpSpec,
-  DispatchOptions,
-  Environment,
-  Logger,
-  Message,
-  MessageRole,
-  ModelClient,
-  ModelPricing,
-  ModelSpec,
-  ModelStreamEvent,
-  ModelTier,
-  MountedTools,
-  OAuthTokens,
-  PausedResult,
-  Permissions,
-  RenderPlan,
-  ResolvedSource,
-  RetryPolicy,
-  RunContext,
-  RunCursor,
-  RunEvent,
-  RunMessageRecord,
-  RunOptions,
-  RunPaused,
-  RunRecord,
-  RunStatus,
-  RunStore,
-  RunnerRegistry,
-  SamplingParams,
-  ScheduleRecord,
-  ScheduleStore,
-  SkillMetadata,
-  SkillRegistry,
-  SpanInfo,
-  SpanKind,
-  SpanOutcome,
-  SpanRecord,
-  SpanStatus,
-  TaskDispatcher,
-  TaskOptions,
-  Tool,
-  ToolCallRecord,
-  ToolCallStore,
-  ToolContext,
-  ToolRegistry,
-  ToolResult,
-  ToolSchema,
-  ToolSource,
-  TokenUsage,
-  Tracer,
-  WebhookAdapter,
-  WebhookMatch,
-  WorkflowContext,
-  WorkflowDefinition,
-  WorkflowOptions,
-};
-
 // Functions
 export { idempotencyKey, estimateCost };
+
+// Every type defined in §5 (data models) is re-exported from the package root.
+// The §5 definitions are canonical; index.ts re-exports them verbatim, so the
+// full list is intentionally not duplicated here.
+export type { /* …all §5 types… */ };
 ```
+
+Beyond the functions above, `@render-agents/sdk` re-exports every type defined in §5 from its package root (`RRunPaused` and `idempotencyKey`/`estimateCost` are the only runtime — non-type — exports). The `@render-agents/sdk/testing` subpath (§7.4) ships `mockModel` and `createTestRuntime` separately.
 
 ### 7.2 `loadAgents` behavior
 
