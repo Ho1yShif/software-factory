@@ -1,6 +1,6 @@
-# 00 — Technical Specification: render-agents SDK
+# 00 — Technical Specification: render-agents
 
-**Author:** Jacob Prall <jacob@render.com>  
+**Author:** Jacob Prall
 **Status:** DRAFT  
 **Date:** 2025-06-25  
 
