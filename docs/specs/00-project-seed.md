@@ -486,6 +486,8 @@ Cross-source collisions on the final model-facing name are hard errors at load t
 
 ### 5.7 Skill (core)
 
+A skill is on-demand instruction content the model can pull into context when it's relevant — not always-on system-prompt text. See §8.9 for the loading model.
+
 ```ts
 interface SkillMetadata {
   id: string;
@@ -501,6 +503,33 @@ interface SkillRegistry {
   ids(): string[];
 }
 ```
+
+**Authoring (`SKILL.md`).** A skill is a directory under `skills/` containing a `SKILL.md`. The directory name is the skill `id`. YAML frontmatter supplies the metadata advertised to the model; the body is the `content` injected on load.
+
+```markdown
+---
+name: Security patterns
+description: Common web-app vulnerability patterns and how to spot them.
+whenToUse: When reviewing code or diffs for security issues (authn, injection, SSRF, secrets).
+---
+
+When auditing for security issues, work through these categories in order:
+
+1. **Authentication & session** — ...
+2. **Injection** (SQL, command, template) — ...
+3. **SSRF & request forgery** — ...
+...
+```
+
+| `SkillMetadata` field | Source |
+|---|---|
+| `id` | Directory name (`skills/security-patterns/` → `security-patterns`) |
+| `name` | `SKILL.md` frontmatter |
+| `description` | `SKILL.md` frontmatter |
+| `whenToUse` | `SKILL.md` frontmatter |
+| `content` | `SKILL.md` body (everything after the frontmatter) |
+
+**Id → metadata resolution.** Frontmatter `skills:` lists ids (`string[]`); `loadAgents` resolves each id against the `SkillRegistry` and stores the fully-resolved `SkillMetadata[]` (including `content`) on `AgentDefinition.skills`, so the runner can serve `load_skill` without re-reading disk. An unresolvable id is a load-time error (§6.5).
 
 ### 5.8 Environment (core)
 
@@ -1251,6 +1280,7 @@ This is the canonical list of hard errors raised at `loadAgents()` time. Other s
 **Discovery & collisions** (§4, §5.6):
 
 - Two sources resolving to the same key (agent name, tool source id, resolved model-facing tool name, skill, workflow, webhook, or runner) — see the §4 discovery table
+- A tool source resolving to a reserved model-facing name (`load_skill`, §8.9)
 - An agent references a tool/skill from a directory that does not exist
 
 **Frontmatter & references:**
@@ -1444,7 +1474,7 @@ The programmable handler lets tests assert on what the agent sent and drive mult
 
 ### 8.1 Loop internals
 
-The default runner (`@render-agents/engine`) executes this cycle:
+Before the first iteration, the runner assembles the system prompt (agent body + `_shared.md` + skill catalog, §8.9) and mounts the agent's tools — including the built-in `load_skill` tool when the agent declares any skills. Then it executes this cycle (`load_skill` is dispatched like any other `tool_use` in step 7):
 
 ```
 [user input]
@@ -1627,6 +1657,36 @@ if (data?.decision === "approve") { /* ... */ }
 
 The schema is part of the agent markdown, so structured output is portable and declared in one place — composing agents pass typed `data` rather than parsing each other's prose.
 
+### 8.9 Skill loading
+
+Skills use **progressive disclosure**: the model is told which skills exist and when to use them, but a skill's full `content` only enters the context window when the model explicitly loads it. This keeps the base system prompt small and pushes per-skill token cost to the runs that actually need it.
+
+**1. Catalog in the system prompt.** During prompt assembly, for each skill in `AgentDefinition.skills` the runner appends a compact catalog entry — `id`, `name`, `description`, `whenToUse` — **not** the body. An agent with no declared skills gets no catalog and no skill tool.
+
+**2. Built-in `load_skill` tool.** When an agent declares ≥1 skill, the runner auto-mounts a built-in tool alongside the agent's declared tools:
+
+```ts
+// Auto-mounted only when the agent declares skills. Not authored by the user.
+const loadSkill: Tool = {
+  name: "load_skill",
+  description: "Load the full instructions for a declared skill by id.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Skill id from the catalog" } },
+    required: ["id"],
+  },
+  // invoke → returns the resolved skill's `content` as the tool_result
+};
+```
+
+**3. On-demand load.** When the model decides a skill applies (guided by `whenToUse`), it calls `load_skill({ id })`. The runner looks the id up in the agent's resolved `skills` set and returns that skill's `content` as the `tool_result`, so the instructions land in the conversation like any other tool output and inform subsequent turns.
+
+**4. Constrained to declared skills.** `load_skill` resolves **only** ids in the agent's declared `skills`. An undeclared or unknown id returns an **error `tool_result`** (the model can recover); it is not a crash. There is no way to load a skill the agent didn't declare.
+
+Because `load_skill` is an ordinary tool, it inherits the dispatch path in §8.3 for free — input validation, a `tool` span (§9.2), and idempotency (loading the same skill twice in a run short-circuits to the stored result). Skills are read-only instruction content and never have side effects.
+
+**Reserved name.** `load_skill` is a reserved model-facing tool name. A user tool source that resolves to `load_skill` is a load-time collision (§6.5).
+
 ---
 
 ## 9. Observability Model
@@ -1662,6 +1722,8 @@ workflow run (trace root)
 | Agent invocation | `agent` | agent name, **agent version**, model, final token usage, iteration count |
 | LLM call | `llm` | model, input tokens, output tokens, stop reason, latency ms |
 | Tool call | `tool` | tool name, latency ms, success/error |
+
+The built-in `load_skill` tool (§8.9) appears as an ordinary `tool` span — tool name `load_skill`, with the loaded skill `id` in attributes — so skill usage is visible in the trace without a dedicated span kind.
 
 Attributes follow OTel semantic conventions where applicable (`gen_ai.*` namespace for LLM spans). Postgres is the source of truth. Export to external collectors (Datadog, Honeycomb, Grafana) is via an optional OTel exporter — not required for full visibility.
 
@@ -2042,7 +2104,7 @@ This spec is implemented across focused sprints. Each sprint has its own spec th
 
 | Sprint | Spec | Scope | Depends on |
 |---|---|---|---|
-| 01 | `01-kernel.md` | Package scaffolding, `createRuntime`, `loadAgents`, `defineTool`, `defineMcpSource`, default runner (+ retry, input validation, structured output), `agent.run()`, local dev CLI, in-memory store, testing utilities (`/testing`) | — |
+| 01 | `01-kernel.md` | Package scaffolding, `createRuntime`, `loadAgents`, `defineTool`, `defineMcpSource`, default runner (+ retry, input validation, structured output, skill loading via `load_skill`), `agent.run()`, local dev CLI, in-memory store, testing utilities (`/testing`) | — |
 | 02 | `02-workflows.md` | `agent.task()` auto-wired to Render Workflows (plan-tier dispatch), `workflow()` helper, `ctx.step` memoization, handler determinism, retries | 01 |
 | 03 | `03-observability.md` | OTel spans, Postgres store, tracer, span retention, trace UI | 01, 02 |
 | 04 | `04-gateway.md` | Web gateway, webhook discovery, SSE streaming, runs API | 02, 03 |
