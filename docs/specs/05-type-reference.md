@@ -1,0 +1,1240 @@
+# Type Reference
+
+**Layer:** L5 — *exact shapes.* Part of the [render-agents specification](00-foundations.md) ([Document Map](00-foundations.md#document-map)).
+
+Every public `interface`/`type` in one place, grouped by package. Narrative and examples live in the layer files that link here.
+
+---
+
+## Core (@render-agents/sdk)
+
+### AgentDefinition
+The parsed, validated, resolved form of an agent markdown file.
+
+```ts
+interface AgentDefinition {
+  name: string;
+  /** Short description of the agent's purpose. Used as the tool description when this agent is exposed as a subagent. Falls back to `name` if absent. */
+  description?: string;
+  /** Author-declared version string. Metadata only — no selection/resolution logic. Recorded on agent spans and run records for audit/repro ("which version produced this?"). */
+  version?: string;
+  model: ModelSpec;
+  systemPrompt: string;
+  tools: string[];
+  /** Agents this agent may spawn as subagents (resolved against the AgentSet). Exposed to the model as `subagents__<name>` tools. */
+  subagents?: string[];
+  skills?: SkillMetadata[];
+  sampling?: SamplingParams;
+  budget?: Budget;
+  permissions?: Permissions;
+  /** Optional JSON Schema for structured output. When set, the runner returns validated `AgentOutput.data`. */
+  output?: Record<string, unknown>;
+  plan?: RenderPlan;
+  runner?: string;
+}
+```
+
+### Permissions
+Per-agent permission block; the resolved tool names that require HITL approval.
+
+```ts
+interface Permissions {
+  /** Resolved tool names that require HITL approval before execution. */
+  requireApproval?: string[];
+}
+```
+
+### RenderPlan
+Render Workflows instance type for a task run.
+
+```ts
+/**
+ * Render Workflows instance type for a task run — Render's `plan` task option.
+ * Values mirror Render's instance-type slugs; `standard` (1 CPU / 2 GB) is the
+ * default. `pro_plus` / `pro_max` / `pro_ultra` require requesting workspace
+ * access. Compute is bound to the task at definition/registration time: there
+ * is no arbitrary cpu/memory, and the run-trigger API (startTask / REST) takes
+ * only task + input — no per-run override. This is why one dispatch task is
+ * registered per referenced plan.
+ */
+type RenderPlan =
+  | "starter"
+  | "standard"
+  | "pro"
+  // The following require requesting workspace access:
+  | "pro_plus"
+  | "pro_max"
+  | "pro_ultra";
+```
+
+### AgentInput
+The input accepted by `agent.run()` / `agent.task()`.
+
+```ts
+type AgentInput = string | Record<string, unknown>;
+```
+
+### AgentOutput
+The completed result of an agent invocation.
+
+```ts
+interface AgentOutput<T = unknown> {
+  text: string;
+  /** Validated structured output. Present only when the agent declares an `output` schema. */
+  data?: T;
+  usage: TokenUsage;
+}
+```
+
+### AgentResult
+An agent invocation inspected at a runtime boundary (completed or paused).
+
+```ts
+/**
+ * Result of an agent invocation when inspected at a runtime boundary.
+ * The happy path of `run()`/`task()` resolves to `AgentOutput` (completed).
+ * On HITL pause, the runner throws `RunPaused` (control-flow signal); the
+ * runtime catch boundary can surface a `PausedResult` for callers that inspect.
+ */
+type AgentResult =
+  | ({ status: "completed" } & AgentOutput)
+  | PausedResult;
+```
+
+### PausedResult
+The paused-boundary view of an agent invocation.
+
+```ts
+interface PausedResult {
+  status: "paused";
+  reason: string;
+  pendingApprovalIds: string[];
+}
+```
+
+### RunPaused
+The control-flow signal thrown by the runner on HITL pause.
+
+```ts
+/** Thrown by the runner to unwind execution on HITL pause. Caught by the workflow/gateway runtime, which marks the run "paused". */
+declare class RunPaused extends Error {
+  readonly runId: string;
+  readonly pendingApprovalIds: string[];
+}
+```
+
+### AgentSet
+The collection of agents returned by `loadAgents()`.
+
+```ts
+interface AgentSet {
+  get(id: string): Agent;
+  get(ids: string[]): Agent[];
+  has(id: string): boolean;
+  all(): Agent[];
+}
+```
+
+### Agent
+A runtime-bound agent handle.
+
+```ts
+interface Agent {
+  readonly name: string;
+  readonly definition: AgentDefinition;
+  /** `T` is the type of `AgentOutput.data` when the agent declares an `output` schema. */
+  run<T = unknown>(input: AgentInput, opts?: RunOptions): Promise<AgentOutput<T>>;
+  task<T = unknown>(input: AgentInput, opts?: TaskOptions): Promise<AgentOutput<T>>;
+}
+```
+
+### RunOptions
+Options for an in-process `agent.run()`.
+
+```ts
+interface RunOptions {
+  signal?: AbortSignal;
+  runId?: string;
+  parentSpanId?: string;
+}
+```
+
+### TaskOptions
+Options for a dispatched `agent.task()`.
+
+```ts
+/**
+ * Options for `agent.task()`. Compute is NOT overridable per dispatch — the
+ * effective plan comes from the agent's frontmatter `plan` (or the default).
+ */
+type TaskOptions = RunOptions;
+```
+
+### ModelSpec
+A concrete model selection.
+
+```ts
+interface ModelSpec {
+  provider: "anthropic" | "openai";
+  model: string;
+  baseURL?: string;
+  apiKeyEnv?: string;
+}
+```
+
+### ModelTier
+The tier aliases that resolve to concrete models.
+
+```ts
+type ModelTier = "small" | "medium" | "large";
+```
+
+### SamplingParams
+Optional model sampling overrides.
+
+```ts
+interface SamplingParams {
+  temperature?: number;
+  topP?: number;
+  maxOutputTokens?: number;
+}
+```
+
+### TokenUsage
+Input/output token counts for a model call.
+
+```ts
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+```
+
+### Budget
+Per-agent-invocation resource ceilings.
+
+```ts
+interface Budget {
+  maxIterations?: number;
+  maxTokens?: number;
+  /** USD ceiling per agent invocation. Default 10; null or 0 disables it. */
+  maxCostUsd?: number | null;
+  maxWallSeconds?: number;
+}
+```
+
+### ContentBlock
+A single block within a message.
+
+```ts
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean };
+```
+
+### MessageRole
+The role of a message in the loop.
+
+```ts
+type MessageRole = "user" | "assistant" | "tool";
+```
+
+### Message
+A single LLM message.
+
+```ts
+interface Message {
+  role: MessageRole;
+  content: ContentBlock[];
+}
+```
+
+### Tool
+A single model-callable capability.
+
+```ts
+interface Tool {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Record<string, unknown>;
+  invoke(input: unknown, ctx: ToolContext): Promise<ToolResult>;
+}
+```
+
+### ToolResult
+The result of a tool invocation.
+
+```ts
+interface ToolResult {
+  content: string;
+  isError?: boolean;
+}
+```
+
+### ToolContext
+The context passed to a tool's `invoke`.
+
+```ts
+interface ToolContext {
+  env(name: string): string | undefined;
+  readonly signal: AbortSignal;
+  readonly logger: Logger;
+  /**
+   * Per-user OAuth connection for the given provider, resolved via the run's
+   * `userId` against the OAuthStore. Returns undefined when there is no user
+   * (system/cron runs) or no stored connection — OAuth-dependent tools should
+   * return a clear error result in that case rather than throwing.
+   */
+  connection(provider: string): Promise<OAuthTokens | undefined>;
+  /** SSRF-guarded fetch. Blocks private IPs, internal ranges, and metadata endpoints. */
+  fetch(url: string, init?: RequestInit): Promise<Response>;
+}
+```
+
+### OAuthTokens
+The per-user OAuth tokens surfaced to a tool.
+
+```ts
+interface OAuthTokens {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: string;
+}
+```
+
+### ToolSource
+A tool directory: provides one or many tools.
+
+```ts
+interface ToolSource {
+  readonly id: string;
+  resolve(env: Environment): Promise<ResolvedSource>;
+}
+```
+
+### ResolvedSource
+A mounted tool source with a disposal hook.
+
+```ts
+interface ResolvedSource {
+  readonly tools: Tool[];
+  close(): Promise<void>;
+}
+```
+
+### DefineToolSpec
+The spec passed to `defineTool`.
+
+```ts
+interface DefineToolSpec {
+  /** Tool name within the source. Required for multi-tool sources. */
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  invoke(input: unknown, ctx: ToolContext): Promise<ToolResult | string>;
+}
+```
+
+### defineTool
+Authoring helper for a local tool source.
+
+```ts
+function defineTool(spec: DefineToolSpec): ToolSource;
+```
+
+### DefineMcpSpec
+The spec passed to `defineMcpSource`.
+
+```ts
+interface DefineMcpSpec {
+  name?: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: () => Record<string, string>;
+}
+```
+
+### defineMcpSource
+Authoring helper for an MCP-backed tool source.
+
+```ts
+function defineMcpSource(spec: DefineMcpSpec): ToolSource;
+```
+
+### SkillMetadata
+On-demand instruction content advertised to the model.
+
+```ts
+interface SkillMetadata {
+  id: string;
+  name: string;
+  description: string;
+  whenToUse: string;
+  content: string;
+}
+```
+
+### SkillRegistry
+The discovered set of skills.
+
+```ts
+interface SkillRegistry {
+  get(id: string): SkillMetadata;
+  has(id: string): boolean;
+  ids(): string[];
+}
+```
+
+### Environment
+The tool-mounting environment passed to a source's `resolve`.
+
+```ts
+interface Environment {
+  readonly logger: Logger;
+  readonly signal: AbortSignal;
+  env(name: string): string | undefined;
+  mount(toolIds: string[]): Promise<MountedTools>;
+  dispose(): Promise<void>;
+}
+```
+
+### MountedTools
+The set of mounted tools, looked up by model-facing name.
+
+```ts
+interface MountedTools {
+  readonly tools: Tool[];
+  byName(name: string): Tool | undefined;
+}
+```
+
+### Logger
+Structured logger injected into tool, environment, run, workflow, and connector contexts.
+
+```ts
+interface Logger {
+  debug(msg: string, meta?: Record<string, unknown>): void;
+  info(msg: string, meta?: Record<string, unknown>): void;
+  warn(msg: string, meta?: Record<string, unknown>): void;
+  error(msg: string, meta?: Record<string, unknown>): void;
+}
+```
+
+### ToolRegistry
+The discovered set of tool sources.
+
+```ts
+interface ToolRegistry {
+  get(id: string): ToolSource;
+  has(id: string): boolean;
+  ids(): string[];
+}
+```
+
+### AgentRunner
+The pluggable agent-loop interface.
+
+```ts
+interface AgentRunner {
+  run(agent: AgentDefinition, input: AgentInput, ctx: RunContext): Promise<AgentOutput>;
+}
+```
+
+### RunContext
+The full platform contract a runner interacts with.
+
+```ts
+interface RunContext {
+  readonly signal: AbortSignal;
+  readonly logger: Logger;
+  readonly tracer: Tracer;
+  readonly runId: string;
+  readonly parentSpanId?: string;
+  /** The user this run belongs to (from the gateway's auth). Undefined for system/cron runs. Used to resolve per-user OAuth in ToolContext. */
+  readonly userId?: string;
+  /** Delegation depth: 0 for a root run, +1 per subagent level. Used to enforce maxDepth. */
+  readonly depth: number;
+  env(name: string): string | undefined;
+
+  mountTools(toolIds: string[]): Promise<MountedTools>;
+
+  /**
+   * HITL gate. Production (gateway) persists an ApprovalRequest and returns
+   * `{ status: "pending" }`; in-process behavior follows the approval mode.
+   * It does NOT block for hours.
+   */
+  requestApproval(toolName: string, input: unknown): Promise<ApprovalResult>;
+
+  /** Budget accounting: called by the runner after each LLM call. */
+  recordUsage(usage: TokenUsage, cost?: number): void;
+
+  /** Streaming: emit a progress event to the gateway. */
+  emit(event: RunEvent): void;
+
+  /** Persist a message for checkpoint-resume (called after each turn). */
+  persistMessage(agentName: string, msg: Message): Promise<void>;
+
+  /** Load persisted messages for a resumed run. Returns [] for fresh runs. */
+  loadMessages(agentName: string): Promise<Message[]>;
+
+  /** Idempotent tool dispatch: check if a tool call already has a stored result. */
+  checkIdempotency(toolCallId: string): Promise<ToolResult | undefined>;
+
+  /** Record a completed tool call for idempotency. */
+  recordToolCall(toolCallId: string, toolName: string, input: unknown, result: ToolResult): Promise<void>;
+
+  /** Cooperative cancellation: check if this run has been cancelled. */
+  isCancelled(): Promise<boolean>;
+}
+```
+
+### ApprovalResult
+The result of a HITL approval gate.
+
+```ts
+type ApprovalResult =
+  | { approved: true }
+  | { approved: false; reason?: string }
+  | { status: "pending"; approvalRequestId: string };
+```
+
+### RunEvent
+A streamed run-progress event.
+
+```ts
+type RunEvent =
+  | { type: "text"; text: string }
+  | { type: "tool_call"; name: string; input: unknown }
+  | { type: "tool_result"; name: string; result: ToolResult }
+  | { type: "status"; status: string };
+```
+
+### workflow
+Binds config + handler into a Render Workflows root task.
+
+```ts
+/** With config. */
+function workflow(
+  opts: WorkflowOptions,
+  handler: (ctx: WorkflowContext) => Promise<unknown>,
+): WorkflowDefinition;
+
+/** Handler only — no config, name inferred from directory. */
+function workflow(
+  handler: (ctx: WorkflowContext) => Promise<unknown>,
+): WorkflowDefinition;
+```
+
+### WorkflowOptions
+Optional configuration for a workflow root task.
+
+```ts
+interface WorkflowOptions {
+  /** Root task timeout in seconds. */
+  timeout?: number;
+  /**
+   * Automatic retries of the root handler on failure. Default 0.
+   * Render retries re-execute the WHOLE handler (no deterministic replay), so
+   * the default avoids duplicate side effects. Durability comes from child
+   * agent.task() runs and Postgres checkpoint/resume, not handler re-runs.
+   */
+  retries?: number;
+  /** Plan for the root task container. */
+  plan?: RenderPlan;
+}
+```
+
+### WorkflowContext
+The run-scoped context passed to a workflow handler.
+
+```ts
+interface WorkflowContext {
+  readonly runId: string;
+  readonly trigger: string;
+  readonly input: unknown;
+  /**
+   * The project's full AgentSet (every agent in agents/), bound to THIS run.
+   * The ONLY supported way to access agents inside a handler.
+   */
+  readonly agents: AgentSet;
+  readonly tracer: Tracer;
+  readonly logger: Logger;
+  readonly signal: AbortSignal;
+  /** The user this run belongs to (from the gateway's auth). Undefined for system/cron runs. Propagates to child agent runs and tool contexts. */
+  readonly userId?: string;
+
+  /**
+   * Memoized deterministic step. The result is persisted by (runId, name); on
+   * handler re-execution (resume/retry) the stored result is returned without
+   * re-running `fn`. Use this for any side-effecting or non-deterministic work
+   * in the handler body. Step names must be unique within a workflow.
+   */
+  step<T>(name: string, fn: () => Promise<T>): Promise<T>;
+}
+```
+
+### WorkflowDefinition
+The discovered, dispatchable workflow.
+
+```ts
+interface WorkflowDefinition {
+  /** Set at discovery time from `workflows/<dir>` directory name. */
+  readonly name: string;
+  readonly options: WorkflowOptions;
+  dispatch(input: unknown, trigger?: string): Promise<RunRecord>;
+}
+```
+
+### WebhookAdapter
+A user-authored inbound event adapter.
+
+```ts
+interface WebhookAdapter {
+  readonly name: string;
+  match(req: Request): WebhookMatch | null;
+  parse(req: Request): Promise<unknown>;
+}
+```
+
+### WebhookMatch
+A matched webhook's workflow dispatch target.
+
+```ts
+interface WebhookMatch {
+  workflow: string;
+  trigger: string;
+}
+```
+
+### idempotencyKey
+Deterministic key for deduplicating tool-call execution.
+
+```ts
+/** Deterministic key for deduplicating tool call execution. */
+function idempotencyKey(runId: string, toolCallId: string): string;
+```
+
+### ToolCallRecord
+A persisted tool-call execution record.
+
+```ts
+interface ToolCallRecord {
+  id: string;
+  runId: string;
+  idempotencyKey: string;
+  toolName: string;
+  input: unknown;
+  result?: ToolResult;
+  status: "pending" | "completed" | "error";
+  startedAt: string;
+  finishedAt?: string;
+}
+```
+
+### ToolCallStore
+The idempotency store for tool-call execution.
+
+```ts
+interface ToolCallStore {
+  /** Returns existing result if the key has been seen, undefined otherwise. */
+  checkIdempotency(key: string): Promise<ToolResult | undefined>;
+  recordToolCall(record: ToolCallRecord): Promise<void>;
+  completeToolCall(id: string, result: ToolResult): Promise<void>;
+}
+```
+
+### CancelStore
+The cooperative cancellation flag store.
+
+```ts
+interface CancelStore {
+  /** Set the cancel flag for a run. */
+  requestCancel(runId: string): Promise<void>;
+  /** Check if a run has been cancelled. Polled each iteration. */
+  isCancelled(runId: string): Promise<boolean>;
+  /** Clear the cancel flag (on run completion). */
+  clearCancel(runId: string): Promise<void>;
+}
+```
+
+### AgentRuntime
+The composition root binding model, store, tracer, runners, and dispatcher.
+
+```ts
+interface AgentRuntime {
+  readonly store: RunStore;
+  readonly tracer: Tracer;
+  readonly model: ModelClient;
+  readonly runners: RunnerRegistry;
+  /** Dispatches agents as Render Workflow tasks. Absent when no workflow server is detected (local fallback to in-process run). */
+  readonly dispatcher?: TaskDispatcher;
+}
+```
+
+### RunnerRegistry
+The set of available runners, keyed by name.
+
+```ts
+interface RunnerRegistry {
+  get(name: string): AgentRunner;
+  has(name: string): boolean;
+}
+```
+
+### TaskDispatcher
+Dispatches an agent run as a Render Workflow task.
+
+```ts
+interface TaskDispatcher {
+  /** Dispatch an agent run as a Render task on the plan-tier matching `plan`. */
+  dispatch(agentName: string, input: AgentInput, opts: DispatchOptions): Promise<AgentOutput>;
+}
+```
+
+### DispatchOptions
+Options carried with a task dispatch.
+
+```ts
+interface DispatchOptions {
+  runId: string;
+  parentSpanId?: string;
+  /** Propagated to the child run so it shares the caller's user/OAuth identity. */
+  userId?: string;
+  /** Delegation depth for the child run (parent depth + 1 when spawned as a subagent). */
+  depth?: number;
+  /** Deterministic key — SHA-256(runId + agentName + callSeq) — for idempotent re-dispatch. */
+  idempotencyKey: string;
+  plan?: RenderPlan;
+  signal?: AbortSignal;
+}
+```
+
+### createRuntime
+Builds a runtime, auto-detecting store, model, and dispatcher from the environment.
+
+```ts
+/** Builds a runtime, auto-detecting store, model, and dispatcher from the environment. */
+function createRuntime(opts?: CreateRuntimeOptions): Promise<AgentRuntime>;
+```
+
+### CreateRuntimeOptions
+Optional overrides for `createRuntime`.
+
+```ts
+/**
+ * All fields are optional overrides. When omitted, each is auto-detected from
+ * the environment per the Auto-detection rules.
+ */
+interface CreateRuntimeOptions {
+  store?: RunStore;
+  tracer?: Tracer;
+  model?: ModelClient;
+  /** Custom/unlisted model pricing, merged over the built-in MODEL_PRICING table. */
+  pricing?: Record<string, ModelPricing>;
+  /** Override the default ModelClient retry policy. Also configurable via env. */
+  retry?: Partial<RetryPolicy>;
+  runners?: RunnerRegistry;
+  /** Override the auto-wired Render Workflows dispatcher. */
+  dispatcher?: TaskDispatcher;
+  /** Subagent delegation limits. Also configurable via env. */
+  delegation?: Partial<DelegationLimits>;
+}
+```
+
+### DelegationLimits
+Subagent delegation safety limits.
+
+```ts
+interface DelegationLimits {
+  /** Max delegation nesting depth (root = 0). Default 5. */
+  maxDepth: number;
+  /** Max total subagent spawns per root run tree. Default 50. */
+  maxFanout: number;
+}
+```
+
+### loadAgents
+Scans a directory, validates and binds agents to a runtime.
+
+```ts
+function loadAgents(dir?: string, runtime?: AgentRuntime): Promise<AgentSet>;
+```
+
+### mockModel
+Testing helper: a programmable `ModelClient`.
+
+```ts
+function mockModel(
+  handler: (args: CompleteArgs) => CompleteResult | Promise<CompleteResult>,
+): ModelClient;
+```
+
+### createTestRuntime
+Testing helper: an in-memory runtime with a mock/provided model and no dispatcher.
+
+```ts
+/** In-memory runtime for tests: memory store, provided/mock model, no dispatcher (so `.task()` falls back to `.run()`). */
+function createTestRuntime(opts?: Partial<CreateRuntimeOptions>): Promise<AgentRuntime>;
+```
+
+---
+
+## Engine (@render-agents/engine)
+
+### ModelClient
+The provider-agnostic model interface.
+
+```ts
+interface ModelClient {
+  complete(args: CompleteArgs): Promise<CompleteResult>;
+  /**
+   * Streaming variant. Yields incremental deltas and returns the final
+   * `CompleteResult`. The engine forwards `text_delta` events via
+   * `RunContext.emit` → SSE `text.delta`. Optional: implementations without
+   * native streaming omit it, and the engine falls back to `complete()`
+   * (one terminal text event). Token-level deltas are post-MVP.
+   */
+  stream?(args: CompleteArgs): AsyncGenerator<ModelStreamEvent, CompleteResult>;
+}
+```
+
+### ModelStreamEvent
+An incremental streaming event from a model.
+
+```ts
+type ModelStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_use_start"; id: string; name: string }
+  | { type: "tool_use_delta"; id: string; partialInput: string };
+```
+
+### CompleteArgs
+The arguments to a model `complete()` call.
+
+```ts
+interface CompleteArgs {
+  model: ModelSpec;
+  system: string;
+  tools: ToolSchema[];
+  messages: Message[];
+  sampling?: SamplingParams;
+  /** Structured-output request. When set, the model is asked to return JSON conforming to this schema (provider-native when supported). */
+  responseFormat?: { type: "json_schema"; schema: Record<string, unknown> };
+  signal: AbortSignal;
+}
+```
+
+### CompleteResult
+The result of a model `complete()` call.
+
+```ts
+interface CompleteResult {
+  content: ContentBlock[];
+  usage: TokenUsage;
+  stopReason: string;
+}
+```
+
+### ToolSchema
+The model-facing schema for a mounted tool.
+
+```ts
+interface ToolSchema {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+```
+
+### RetryPolicy
+Transient-failure retry policy for the default ModelClient.
+
+```ts
+/**
+ * Retry policy for the default ModelClient. Retries transient failures
+ * (network errors + `retryableStatuses`) with exponential backoff + jitter,
+ * honoring a `Retry-After` header when present. Retries are transparent: they
+ * are NOT new loop iterations and add no token budget; `maxWallSeconds` still
+ * bounds total elapsed time.
+ */
+interface RetryPolicy {
+  maxRetries: number;          // default 3
+  initialDelayMs: number;      // default 500
+  maxDelayMs: number;          // default 30000
+  backoffMultiplier: number;   // default 2
+  retryableStatuses: number[]; // default [429, 500, 502, 503, 504]
+}
+```
+
+### ModelPricing
+Per-1M-token pricing for a model.
+
+```ts
+interface ModelPricing {
+  inputPer1M: number;
+  outputPer1M: number;
+}
+```
+
+### MODEL_PRICING
+The built-in known-model pricing table.
+
+```ts
+/** Known model pricing table. Updated as new models ship. */
+const MODEL_PRICING: Record<string, ModelPricing>;
+```
+
+### estimateCost
+Estimates USD cost for a single LLM call.
+
+```ts
+/** Estimate cost in USD for a single LLM call. */
+function estimateCost(model: string, usage: TokenUsage): number;
+```
+
+---
+
+## Store (@render-agents/store)
+
+### SpanKind
+The kind of an observability span.
+
+```ts
+type SpanKind = "workflow" | "agent" | "llm" | "tool" | "step";
+```
+
+### SpanInfo
+The identity of a span at start time.
+
+```ts
+interface SpanInfo {
+  spanId: string;
+  parentSpanId?: string;
+  runId: string;
+  name: string;
+  kind: SpanKind;
+}
+```
+
+### SpanOutcome
+The terminal outcome of a span.
+
+```ts
+type SpanOutcome =
+  | { ok: true; output: unknown }
+  | { ok: false; error: string };
+```
+
+### Tracer
+The span emitter interface.
+
+```ts
+interface Tracer {
+  onStart(span: SpanInfo, input: unknown): void;
+  onEnd(span: SpanInfo, outcome: SpanOutcome): void;
+}
+```
+
+### RunStatus
+The lifecycle status of a run.
+
+```ts
+type RunStatus = "pending" | "running" | "paused" | "completed" | "failed" | "cancelled";
+```
+
+### SpanStatus
+The lifecycle status of a span.
+
+```ts
+type SpanStatus = "running" | "ok" | "error";
+```
+
+### RunRecord
+The persisted record of a run.
+
+```ts
+interface RunRecord {
+  id: string;
+  workflow: string;
+  status: RunStatus;
+  input?: unknown;
+  result?: unknown;
+  error?: string;
+  trigger?: string;
+  /** Accumulated USD cost across all agent invocations in this run. */
+  totalCostUsd: number;
+  /** Serialized loop cursor for checkpoint-resume. */
+  cursor?: RunCursor;
+  conversationId?: string;
+  userId?: string;
+  /** Agent version, when this run corresponds to a single agent invocation (audit/repro). */
+  agentVersion?: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+```
+
+### RunCursor
+The serialized loop cursor for checkpoint-resume.
+
+```ts
+interface RunCursor {
+  usage: TokenUsage;
+  iteration: number;
+}
+```
+
+### SpanRecord
+The persisted record of a span.
+
+```ts
+interface SpanRecord {
+  id: string;
+  runId: string;
+  parentId?: string;
+  seq: number;
+  name: string;
+  kind: SpanKind;
+  status: SpanStatus;
+  input?: unknown;
+  output?: unknown;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+  attributes?: Record<string, unknown>;
+}
+```
+
+### RunMessageRecord
+A persisted LLM loop message.
+
+```ts
+/** LLM loop message persisted to Postgres for inspectability and resume. */
+interface RunMessageRecord {
+  id: string;
+  runId: string;
+  agentName: string;
+  seq: number;
+  role: MessageRole;
+  content: ContentBlock[];
+  createdAt: string;
+}
+```
+
+### RunStore
+The persistence interface for runs, spans, messages, and steps.
+
+```ts
+interface RunStore {
+  init(): Promise<void>;
+
+  createRun(run: RunRecord): Promise<void>;
+  updateRun(id: string, patch: Partial<RunRecord>): Promise<void>;
+  getRun(id: string): Promise<RunRecord | undefined>;
+  listRuns(opts?: ListRunsOptions): Promise<RunRecord[]>;
+
+  startSpan(span: SpanRecord): Promise<void>;
+  endSpan(id: string, patch: Partial<SpanRecord>): Promise<void>;
+  listSpans(runId: string): Promise<SpanRecord[]>;
+
+  /** Persist an LLM loop message (called after each model turn and tool result). */
+  appendRunMessage(msg: RunMessageRecord): Promise<void>;
+  /** Retrieve persisted messages for checkpoint-resume. */
+  getRunMessages(runId: string, agentName: string): Promise<RunMessageRecord[]>;
+
+  /** Memoized workflow step result (ctx.step). Returns existing result if present. */
+  getStepResult(runId: string, name: string): Promise<{ value: unknown } | undefined>;
+  /** Persist a memoized workflow step result keyed by (runId, name). */
+  putStepResult(runId: string, name: string, value: unknown): Promise<void>;
+
+  close(): Promise<void>;
+}
+```
+
+### ListRunsOptions
+Filter and pagination options for `listRuns`.
+
+```ts
+interface ListRunsOptions {
+  workflow?: string;
+  status?: RunStatus;
+  limit?: number;
+  /** Keyset cursor: runs older than this ID. More efficient than offset for large sets. */
+  before?: string;
+}
+```
+
+### ScheduleRecord
+A persisted scheduled-trigger record.
+
+```ts
+interface ScheduleRecord {
+  id: string;
+  workflow: string;
+  cronExpression: string;
+  input?: unknown;
+  enabled: boolean;
+  lastRunId?: string;
+  lastRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### ScheduleStore
+The persistence interface for schedules.
+
+```ts
+interface ScheduleStore {
+  createSchedule(schedule: ScheduleRecord): Promise<void>;
+  getSchedule(id: string): Promise<ScheduleRecord | undefined>;
+  updateSchedule(id: string, patch: Partial<ScheduleRecord>): Promise<void>;
+  deleteSchedule(id: string): Promise<void>;
+  listSchedules(): Promise<ScheduleRecord[]>;
+  listEnabled(): Promise<ScheduleRecord[]>;
+}
+```
+
+---
+
+## Gateway (@render-agents/gateway)
+
+### Session
+A user session.
+
+```ts
+interface Session {
+  id: string;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  lastActiveAt: string;
+}
+```
+
+### Conversation
+A multi-turn conversation within a session.
+
+```ts
+interface Conversation {
+  id: string;
+  sessionId: string;
+  messages: ConversationMessage[];
+  createdAt: string;
+}
+```
+
+### ConversationMessage
+A single user/assistant turn in a conversation.
+
+```ts
+interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  runId?: string;
+  createdAt: string;
+}
+```
+
+### SessionStore
+The persistence interface for sessions and conversations.
+
+```ts
+interface SessionStore {
+  createSession(session: Session): Promise<void>;
+  getSession(id: string): Promise<Session | undefined>;
+  updateSession(id: string, patch: Partial<Session>): Promise<void>;
+  createConversation(conv: Conversation): Promise<void>;
+  getConversation(id: string): Promise<Conversation | undefined>;
+  appendMessage(conversationId: string, msg: ConversationMessage): Promise<void>;
+  listConversations(sessionId: string): Promise<Conversation[]>;
+}
+```
+
+### ApprovalRequest
+A persisted HITL approval request.
+
+```ts
+interface ApprovalRequest {
+  id: string;
+  runId: string;
+  toolName: string;
+  toolInput: unknown;
+  agentName: string;
+  status: "pending" | "approved" | "denied";
+  requestedAt: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  reason?: string;
+}
+```
+
+### ApprovalStore
+The persistence interface for approvals.
+
+```ts
+interface ApprovalStore {
+  createRequest(req: ApprovalRequest): Promise<void>;
+  getRequest(id: string): Promise<ApprovalRequest | undefined>;
+  listPending(runId: string): Promise<ApprovalRequest[]>;
+  resolve(id: string, decision: { approved: boolean; resolvedBy?: string; reason?: string }): Promise<void>;
+}
+```
+
+### OAuthConnection
+A persisted per-user OAuth connection.
+
+```ts
+interface OAuthConnection {
+  id: string;
+  userId: string;
+  provider: string;
+  accessToken: string;      // encrypted at rest
+  refreshToken?: string;    // encrypted at rest
+  expiresAt?: string;
+  scopes: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### OAuthStore
+The persistence interface for OAuth connections.
+
+```ts
+interface OAuthStore {
+  getConnection(userId: string, provider: string): Promise<OAuthConnection | undefined>;
+  upsertConnection(conn: OAuthConnection): Promise<void>;
+  deleteConnection(userId: string, provider: string): Promise<void>;
+  listConnections(userId: string): Promise<OAuthConnection[]>;
+}
+```
+
+### ConnectorSpec
+A package-contributed inbound webhook endpoint.
+
+```ts
+interface ConnectorSpec {
+  /** Route key: mounted at `/connectors/:key`. */
+  key: string;
+  /** Human-readable name. */
+  name: string;
+  /** Handle the inbound webhook request. Returns a workflow dispatch. */
+  handle(req: Request, ctx: ConnectorContext): Promise<WebhookMatch | null>;
+}
+```
+
+### ConnectorContext
+The context passed to a connector's `handle`.
+
+```ts
+interface ConnectorContext {
+  env(name: string): string | undefined;
+  readonly logger: Logger;
+}
+```
