@@ -61,9 +61,11 @@ render-agents/                         # monorepo root
 │   ├── sdk/                           # @render-agents/sdk — public API surface
 │   │   ├── src/
 │   │   │   ├── index.ts               # re-exports everything below
+│   │   │   ├── runtime.ts             # createRuntime, AgentRuntime
 │   │   │   ├── agents.ts              # loadAgents, AgentSet
 │   │   │   ├── workflow.ts            # workflow() helper
 │   │   │   ├── tool.ts                # defineTool, defineMcpSource
+│   │   │   ├── testing.ts             # @render-agents/sdk/testing (mockModel, createTestRuntime)
 │   │   │   └── types.ts               # all public type re-exports
 │   │   └── package.json
 │   ├── engine/                        # @render-agents/engine — default runner + LLM loop
@@ -187,6 +189,7 @@ All types below are the canonical contracts. Implementations must conform exactl
 ```ts
 interface AgentDefinition {
   name: string;
+  /** Author-declared version string. Metadata only — no selection/resolution logic. Recorded on agent spans and run records for audit/repro ("which version produced this?"). */
   version?: string;
   model: ModelSpec;
   systemPrompt: string;
@@ -195,26 +198,60 @@ interface AgentDefinition {
   sampling?: SamplingParams;
   budget?: Budget;
   permissions?: Permissions;
-  compute?: ComputeSpec;
+  /** Optional JSON Schema for structured output. When set, the runner returns validated `AgentOutput.data`. */
+  output?: Record<string, unknown>;
+  plan?: RenderPlan;
   runner?: string;
 }
 
 interface Permissions {
-  allowedTools?: string[];
-  deniedTools?: string[];
+  /** Resolved tool names that require HITL approval before execution. */
   requireApproval?: string[];
 }
 
-interface ComputeSpec {
-  cpu?: number;
-  memory?: string;   // e.g. "4GB"
-}
+/**
+ * Render instance plan for a task container. Mirrors Render plan slugs.
+ * Compute is opt-in: agents run on the default plan unless one is set.
+ * There is no arbitrary cpu/memory or per-run override — Render binds compute
+ * to a plan at task registration.
+ */
+type RenderPlan =
+  | "starter"
+  | "standard"
+  | "pro"
+  | "pro_plus"
+  | "pro_max"
+  | "pro_ultra";
 
 type AgentInput = string | Record<string, unknown>;
 
-interface AgentOutput {
+interface AgentOutput<T = unknown> {
   text: string;
+  /** Validated structured output. Present only when the agent declares an `output` schema (§5.1, §8.8). */
+  data?: T;
   usage: TokenUsage;
+}
+
+/**
+ * Result of an agent invocation when inspected at a runtime boundary.
+ * The happy path of `run()`/`task()` resolves to `AgentOutput` (completed).
+ * On HITL pause, the runner throws `RunPaused` (control-flow signal); the
+ * runtime catch boundary can surface a `PausedResult` for callers that inspect.
+ */
+type AgentResult =
+  | ({ status: "completed" } & AgentOutput)
+  | PausedResult;
+
+interface PausedResult {
+  status: "paused";
+  reason: string;
+  pendingApprovalIds: string[];
+}
+
+/** Thrown by the runner to unwind execution on HITL pause. Caught by the workflow/gateway runtime, which marks the run "paused". */
+declare class RunPaused extends Error {
+  readonly runId: string;
+  readonly pendingApprovalIds: string[];
 }
 ```
 
@@ -231,8 +268,9 @@ interface AgentSet {
 interface Agent {
   readonly name: string;
   readonly definition: AgentDefinition;
-  run(input: AgentInput, opts?: RunOptions): Promise<AgentOutput>;
-  task(input: AgentInput, opts?: TaskOptions): Promise<AgentOutput>;
+  /** `T` is the type of `AgentOutput.data` when the agent declares an `output` schema. */
+  run<T = unknown>(input: AgentInput, opts?: RunOptions): Promise<AgentOutput<T>>;
+  task<T = unknown>(input: AgentInput, opts?: TaskOptions): Promise<AgentOutput<T>>;
 }
 
 interface RunOptions {
@@ -241,9 +279,12 @@ interface RunOptions {
   parentSpanId?: string;
 }
 
-interface TaskOptions extends RunOptions {
-  compute?: ComputeSpec;
-}
+/**
+ * Options for `agent.task()`. Compute is NOT overridable per dispatch — the
+ * effective plan comes from the agent's frontmatter `plan` (or the default).
+ * See §8.6 for the auto-wired plan-tier dispatch model.
+ */
+type TaskOptions = RunOptions;
 ```
 
 ### 5.3 Model
@@ -272,7 +313,8 @@ interface TokenUsage {
 interface Budget {
   maxIterations?: number;
   maxTokens?: number;
-  maxCostUsd?: number;
+  /** USD ceiling per agent invocation. Default 10. Set to null or 0 to disable the cost ceiling explicitly. */
+  maxCostUsd?: number | null;
   maxWallSeconds?: number;
 }
 ```
@@ -312,7 +354,12 @@ interface ToolContext {
   env(name: string): string | undefined;
   readonly signal: AbortSignal;
   readonly logger: Logger;
-  /** Per-user OAuth connection for the given provider (injected by gateway). */
+  /**
+   * Per-user OAuth connection for the given provider, resolved via the run's
+   * `userId` against the OAuthStore. Returns undefined when there is no user
+   * (system/cron runs) or no stored connection — OAuth-dependent tools should
+   * return a clear error result in that case rather than throwing.
+   */
   connection(provider: string): Promise<OAuthTokens | undefined>;
   /** SSRF-guarded fetch. Blocks private IPs, internal ranges, and metadata endpoints. */
   fetch(url: string, init?: RequestInit): Promise<Response>;
@@ -480,11 +527,20 @@ interface RunContext {
   readonly tracer: Tracer;
   readonly runId: string;
   readonly parentSpanId?: string;
+  /** The user this run belongs to (from the gateway's auth). Undefined for system/cron runs. Used to resolve per-user OAuth in ToolContext. */
+  readonly userId?: string;
   env(name: string): string | undefined;
 
   mountTools(toolIds: string[]): Promise<MountedTools>;
 
-  /** HITL: pause execution and wait for approval. No-op in-process. */
+  /**
+   * HITL gate. In production (gateway): persists an ApprovalRequest, writes
+   * placeholder tool_results for pending tool_use blocks, and returns
+   * `{ status: "pending" }`, after which the runner throws `RunPaused` to unwind.
+   * It does NOT block for hours. In-process (no gateway) behavior follows the
+   * approval mode (§8.3.2): auto-approve by default (logged + audited, never
+   * silent), or strict (CLI prompt) when RENDER_AGENTS_STRICT_APPROVAL is set.
+   */
   requestApproval(toolName: string, input: unknown): Promise<ApprovalResult>;
 
   /** Budget accounting: called by the runner after each LLM call. */
@@ -511,7 +567,8 @@ interface RunContext {
 
 type ApprovalResult =
   | { approved: true }
-  | { approved: false; reason?: string };
+  | { approved: false; reason?: string }
+  | { status: "pending"; approvalRequestId: string };
 
 type RunEvent =
   | { type: "text"; text: string }
@@ -527,7 +584,20 @@ The `RunContext` is the full platform contract a runner must interact with. It c
 ```ts
 interface ModelClient {
   complete(args: CompleteArgs): Promise<CompleteResult>;
+  /**
+   * Streaming variant. Yields incremental deltas and returns the final
+   * `CompleteResult`. The engine forwards `text_delta` events via
+   * `RunContext.emit` → SSE `text.delta`. Optional: implementations without
+   * native streaming omit it, and the engine falls back to `complete()`
+   * (one terminal text event). Token-level deltas are post-MVP (§11.3).
+   */
+  stream?(args: CompleteArgs): AsyncGenerator<ModelStreamEvent, CompleteResult>;
 }
+
+type ModelStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_use_start"; id: string; name: string }
+  | { type: "tool_use_delta"; id: string; partialInput: string };
 
 interface CompleteArgs {
   model: ModelSpec;
@@ -535,6 +605,8 @@ interface CompleteArgs {
   tools: ToolSchema[];
   messages: Message[];
   sampling?: SamplingParams;
+  /** Structured-output request. When set, the model is asked to return JSON conforming to this schema (provider-native when supported). */
+  responseFormat?: { type: "json_schema"; schema: Record<string, unknown> };
   signal: AbortSignal;
 }
 
@@ -548,6 +620,21 @@ interface ToolSchema {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+}
+
+/**
+ * Retry policy for the default ModelClient. Retries transient failures
+ * (network errors + `retryableStatuses`) with exponential backoff + jitter,
+ * honoring a `Retry-After` header when present. Retries are transparent: they
+ * are NOT new loop iterations and add no token budget; `maxWallSeconds` still
+ * bounds total elapsed time.
+ */
+interface RetryPolicy {
+  maxRetries: number;          // default 3
+  initialDelayMs: number;      // default 500
+  maxDelayMs: number;          // default 30000
+  backoffMultiplier: number;   // default 2
+  retryableStatuses: number[]; // default [429, 500, 502, 503, 504]
 }
 ```
 
@@ -594,6 +681,8 @@ interface RunRecord {
   cursor?: RunCursor;
   conversationId?: string;
   userId?: string;
+  /** Agent version, when this run corresponds to a single agent invocation (audit/repro; §5.1). */
+  agentVersion?: string;
   startedAt: string;
   finishedAt?: string;
 }
@@ -646,6 +735,11 @@ interface RunStore {
   appendRunMessage(msg: RunMessageRecord): Promise<void>;
   /** Retrieve persisted messages for checkpoint-resume. */
   getRunMessages(runId: string, agentName: string): Promise<RunMessageRecord[]>;
+
+  /** Memoized workflow step result (ctx.step). Returns existing result if present. */
+  getStepResult(runId: string, name: string): Promise<{ value: unknown } | undefined>;
+  /** Persist a memoized workflow step result keyed by (runId, name). */
+  putStepResult(runId: string, name: string, value: unknown): Promise<void>;
 
   close(): Promise<void>;
 }
@@ -760,20 +854,41 @@ function workflow(
 interface WorkflowOptions {
   /** Root task timeout in seconds. */
   timeout?: number;
-  /** Number of automatic retries on failure. */
+  /**
+   * Automatic retries of the root handler on failure. Default 0.
+   * Render retries re-execute the WHOLE handler (no deterministic replay), so
+   * the default avoids duplicate side effects. Durability comes from child
+   * agent.task() runs and Postgres checkpoint/resume, not handler re-runs (§8.7).
+   */
   retries?: number;
-  /** Compute profile for the root task container. */
-  compute?: ComputeSpec;
+  /** Plan for the root task container. */
+  plan?: RenderPlan;
 }
 
 interface WorkflowContext {
   readonly runId: string;
   readonly trigger: string;
   readonly input: unknown;
+  /**
+   * The project's full AgentSet (every agent in agents/), bound to THIS run.
+   * This is the ONLY supported way to access agents inside a handler — run/task
+   * calls auto-correlate spans and dispatch keys to this run. Do not use a
+   * module-level loadAgents() closure inside a handler (see §5.23).
+   */
   readonly agents: AgentSet;
   readonly tracer: Tracer;
   readonly logger: Logger;
   readonly signal: AbortSignal;
+  /** The user this run belongs to (from the gateway's auth). Undefined for system/cron runs. Propagates to child agent runs and tool contexts. */
+  readonly userId?: string;
+
+  /**
+   * Memoized deterministic step. The result is persisted by (runId, name); on
+   * handler re-execution (resume/retry) the stored result is returned without
+   * re-running `fn`. Use this for any side-effecting or non-deterministic work
+   * in the handler body (§8.7). Step names must be unique within a workflow.
+   */
+  step<T>(name: string, fn: () => Promise<T>): Promise<T>;
 }
 
 interface WorkflowDefinition {
@@ -784,7 +899,7 @@ interface WorkflowDefinition {
 }
 ```
 
-The `workflow()` helper binds **config + handler** into a Render Workflows root `task()`. The name is always inferred from the directory (`workflows/code-review/index.ts` → `"code-review"`) — it is set by the loader at discovery time, not by the author. Config is optional when defaults are fine.
+The `workflow()` helper binds **config + handler** into a Render Workflows root `task()`. The name is always inferred from the directory (`workflows/code-review/index.ts` → `"code-review"`) — it is set by the loader at discovery time, not by the author. Config is optional.
 
 ```ts
 // workflows/code-review/index.ts
@@ -793,16 +908,16 @@ The `workflow()` helper binds **config + handler** into a Render Workflows root 
 export default workflow(async (ctx) => {
   const { patches } = ctx.input;
   const findings = await Promise.all(
-    agents.get(["security", "performance"]).map(a => a.task({ patches }))
+    ctx.agents.get(["security", "performance"]).map(a => a.task({ patches }))
   );
-  return agents.get("judge").run({ findings });
+  return ctx.agents.get("judge").run({ findings });
 });
 
 // With config
 export default workflow({
   timeout: 600,
   retries: 2,
-  compute: { cpu: 1, memory: "2GB" },
+  plan: "standard",
 }, async (ctx) => {
   // ...
 });
@@ -889,7 +1004,13 @@ const MODEL_PRICING: Record<string, ModelPricing>;
 function estimateCost(model: string, usage: TokenUsage): number;
 ```
 
-The pricing table is a simple record keyed by model string. The `estimateCost` function is called after each `complete()` call, and the result is accumulated on the run's `totalCostUsd`. Unknown models default to `0` cost (no enforcement, not an error) with a logger warning.
+The pricing table is a simple record keyed by model string. The `estimateCost` function is called after each `complete()` call, and the result is accumulated on the run's `totalCostUsd`.
+
+**Unknown models** default to `0` cost (cost budget not enforced — not a hard error), but with a **loud warning emitted at load time** (visible in CI), repeated at runtime. The other budgets (`maxIterations`, `maxTokens`, `maxWallSeconds`) still apply regardless, so an unpriced model is never fully unbounded.
+
+**Custom/unlisted model pricing** is supplied by extending the table via `createRuntime({ pricing })` (merged over the built-in `MODEL_PRICING`). Once registered, the model is priced and the cost budget is enforced normally.
+
+**Explicit opt-out:** set `budget.maxCostUsd: null` (or `0`) to deliberately disable the cost ceiling. This silences the unknown-pricing warning for that agent — the choice is then explicit rather than accidental.
 
 ### 5.21 Schedules
 
@@ -942,6 +1063,75 @@ interface ConnectorContext {
 
 Connectors are contributed by tool packages via an optional `connectors` export. The gateway auto-discovers them at startup and mounts each at `/connectors/:key`. User-authored `webhooks/` and package-contributed connectors share the same dispatch mechanism but live in separate namespaces (no collisions).
 
+### 5.23 Runtime & Composition
+
+Agents returned by `loadAgents()` are inert definitions until they are bound to a **runtime** — the composition root that supplies the model client, store, tracer, runner registry, and (in production) the task dispatcher. Both the gateway and the workflow service construct the *same* `AgentRuntime` via `createRuntime()`, so wiring is identical across services.
+
+```ts
+interface AgentRuntime {
+  readonly store: RunStore;
+  readonly tracer: Tracer;
+  readonly model: ModelClient;
+  readonly runners: RunnerRegistry;
+  /** Dispatches agents as Render Workflow tasks. Absent when no workflow server is detected (local fallback to in-process run). */
+  readonly dispatcher?: TaskDispatcher;
+}
+
+interface RunnerRegistry {
+  get(name: string): AgentRunner;
+  has(name: string): boolean;
+}
+
+interface TaskDispatcher {
+  /** Dispatch an agent run as a Render task on the plan-tier matching `plan`. */
+  dispatch(agentName: string, input: AgentInput, opts: DispatchOptions): Promise<AgentOutput>;
+}
+
+interface DispatchOptions {
+  runId: string;
+  parentSpanId?: string;
+  /** Propagated to the child run so it shares the caller's user/OAuth identity. */
+  userId?: string;
+  /** Deterministic key — SHA-256(runId + agentName + callSeq) — for idempotent re-dispatch (§8.6). */
+  idempotencyKey: string;
+  plan?: RenderPlan;
+  signal?: AbortSignal;
+}
+
+/** Builds a runtime, auto-detecting store, model, and dispatcher from the environment. */
+function createRuntime(opts?: CreateRuntimeOptions): Promise<AgentRuntime>;
+
+interface CreateRuntimeOptions {
+  /** Default: Postgres RunStore if DATABASE_URL is set, else in-memory. */
+  store?: RunStore;
+  /** Default: span emitter writing to `store`. */
+  tracer?: Tracer;
+  /** Default: provider inferred from the agent's model / apiKeyEnv. */
+  model?: ModelClient;
+  /** Custom/unlisted model pricing, merged over the built-in MODEL_PRICING table (§5.20). */
+  pricing?: Record<string, ModelPricing>;
+  /** Override the default ModelClient retry policy (§5.10). Also configurable via env. */
+  retry?: Partial<RetryPolicy>;
+  /** Default: { default: DefaultRunner } plus any adapters discovered in runners/. */
+  runners?: RunnerRegistry;
+  /** Default: Render Workflows dispatcher when RENDER_SDK_SOCKET_PATH or RENDER_USE_LOCAL_DEV is set; otherwise undefined (in-process fallback). */
+  dispatcher?: TaskDispatcher;
+}
+```
+
+**Binding.** `loadAgents(dir?, runtime?)` accepts an optional runtime. When omitted, the loader lazily builds one with `createRuntime()` (env-driven defaults). Every `Agent` produced by the set closes over this runtime, so `agent.run()` / `agent.task()` already know which model, store, tracer, runner, and dispatcher to use — there is no global singleton and no per-call dependency wiring.
+
+**`loadAgents` is bootstrapping, not in-handler API.** The gateway and workflow service call `loadAgents()` once at startup to build the project AgentSet; the workflow runtime then exposes a run-scoped view of that same set as `ctx.agents` for each run. **Inside a workflow handler, always use `ctx.agents`** — it carries the current run's id, tracer, and parent span so spans nest and dispatch/idempotency keys are correct. Use a module-level `loadAgents()` closure only *outside* a handler (scripts, tests, gateway dispatch); a closure used inside a handler is not run-scoped and will mis-correlate traces. There is exactly one in-handler path (`ctx.agents`).
+
+**Auto-detection rules:**
+
+| Dependency | Default resolution |
+|---|---|
+| Store | Postgres if `DATABASE_URL` set, else in-memory |
+| Model client | Provider inferred from the agent's `model` (or its `apiKeyEnv`) |
+| Runner registry | `default` → `DefaultRunner`, plus adapters in `runners/` |
+| Dispatcher | Render Workflows dispatcher when `RENDER_SDK_SOCKET_PATH` / `RENDER_USE_LOCAL_DEV` present; otherwise in-process fallback (`.task()` runs as `.run()`) |
+
 ---
 
 ## 6. Agent Markdown Schema
@@ -956,16 +1146,19 @@ model: claude-sonnet-4-6
 tools: [github, sandbox]
 skills: [security-patterns]
 permissions:
-  requireApproval: [push_code, merge_pr]
-  deniedTools: [delete_repo]
+  requireApproval: [github__push_code, github__merge_pr]
 budget:
   maxIterations: 30
   maxTokens: 500000
   maxCostUsd: 2
   maxWallSeconds: 300
-compute:
-  cpu: 2
-  memory: 4GB
+output:
+  type: object
+  properties:
+    decision: { type: string, enum: [approve, reject] }
+    reasons: { type: array, items: { type: string } }
+  required: [decision]
+plan: standard
 sampling:
   temperature: 0
 runner: default
@@ -982,15 +1175,13 @@ You are a security reviewer. Given a set of file patches, analyze each for...
 | `provider` | `"anthropic" \| "openai"` | Inferred from model | Load time |
 | `tools` | `string[]` | `[]` | Load time (source ids or `sourceId__toolName`) |
 | `skills` | `string[]` | `[]` | Load time (resolved against `skills/`) |
-| `permissions.allowedTools` | `string[]` | (all tools) | Load time |
-| `permissions.deniedTools` | `string[]` | `[]` | Load time |
 | `permissions.requireApproval` | `string[]` | `[]` | Load time |
+| `output` | JSON Schema (object) | (none — text only) | Load time (valid JSON Schema) |
 | `budget.maxIterations` | `number` | `50` | Load time |
 | `budget.maxTokens` | `number` | `1000000` | Load time |
-| `budget.maxCostUsd` | `number` | (none) | Load time |
+| `budget.maxCostUsd` | `number` | `10` (per agent) | Load time |
 | `budget.maxWallSeconds` | `number` | (none) | Load time |
-| `compute.cpu` | `number` | (platform default) | Load time |
-| `compute.memory` | `string` | (platform default) | Load time |
+| `plan` | `RenderPlan` (Render plan slug) | (default plan) | Load time (must be a known plan) |
 | `sampling.temperature` | `number` | (provider default) | Load time |
 | `sampling.topP` | `number` | (provider default) | Load time |
 | `sampling.maxOutputTokens` | `number` | (provider default) | Load time |
@@ -1015,6 +1206,8 @@ tools: [web_fetch, github__get_file]
 - A namespaced tool name (`github__get_file`) → mount the source (if not already), but only expose the named tool. Other tools from the same source are not visible to the model.
 - Unknown source id or tool name → hard error at load time.
 
+**`requireApproval` references resolved names.** It matches against the agent's **expanded tool set** — the resolved model-facing names (`github__merge_pr`, or flat `web_fetch` for single-tool sources), not source ids. Listing a bare source id in `tools` (e.g. `github`) expands to all of that source's resolved tool names for matching. Validation runs against this expanded set. There is no allow/deny list: `tools[]` is the sole allowlist, and only declared tools are ever mounted or presented to the model.
+
 ### 6.3 Model tiers
 
 | Tier | Provider | Model |
@@ -1027,11 +1220,19 @@ Raw model strings (e.g. `gpt-4o`, `claude-opus-4-6`) are passed through. Provide
 
 ### 6.4 `_shared.md`
 
-If `agents/_shared.md` exists, its body is prepended to every agent's system prompt. The shared file may have frontmatter for default values; per-agent frontmatter overrides it field-by-field.
+If `agents/_shared.md` exists, it provides shared defaults merged into every agent.
 
-Merge order: `_shared.md` body + `\n\n` + agent body.
+**Body merge:** `_shared.md` body + `\n\n` + agent body (prepend; Open Q #1).
 
-Frontmatter merge: shallow merge, agent wins on conflict.
+**Frontmatter merge (deep):** the agent definition is computed by deep-merging `_shared.md` frontmatter with the agent's frontmatter, per field type:
+
+| Field type | Examples | Merge rule |
+|---|---|---|
+| Nested objects | `budget`, `permissions`, `sampling` | Deep merge per leaf; agent leaf wins on conflict, shared leaves preserved otherwise |
+| Arrays | `tools`, `skills`, `permissions.requireApproval` | Union + dedupe (shared ∪ agent) |
+| Scalars | `model`, `plan`, `runner`, `version` | Agent wins → falls back to shared → built-in default |
+
+Example: `_shared.md` sets `budget: { maxIterations: 30, maxCostUsd: 10 }` and an agent sets `budget: { maxCostUsd: 2 }`. The merged budget is `{ maxIterations: 30, maxCostUsd: 2 }` — the shared `maxIterations` is preserved.
 
 ### 6.5 Validation rules
 
@@ -1041,10 +1242,11 @@ The following are hard errors at `loadAgents()` time:
 - Tool reference not resolvable: source id not found in `tools/`, or namespaced tool name references a source that exists but doesn't contain that tool
 - Skill name not found in `skills/` registry
 - Model tier or model string not recognized
+- `plan` not a known `RenderPlan` slug
+- `output` is not a valid JSON Schema
 - Runner name not found in `runners/` or not `"default"`
-- `requireApproval` references a tool name not in the agent's `tools` list
-- `allowedTools` and `deniedTools` are both set (mutually exclusive)
-- Budget values are non-positive
+- `requireApproval` references a name not in the agent's **expanded tool set** (the resolved model-facing names — namespaced `sourceId__toolName` for multi-tool/MCP sources, flat for single-tool sources — not the raw `tools[]` source ids)
+- Budget values are non-positive (except `maxCostUsd`, which accepts `null` or `0` to explicitly disable the cost ceiling)
 - Empty system prompt body
 
 ---
@@ -1054,8 +1256,9 @@ The following are hard errors at `loadAgents()` time:
 ### 7.1 `@render-agents/sdk` exports
 
 ```ts
-// Agent loading
-export function loadAgents(dir?: string): Promise<AgentSet>;
+// Runtime + agent loading
+export function createRuntime(opts?: CreateRuntimeOptions): Promise<AgentRuntime>;
+export function loadAgents(dir?: string, runtime?: AgentRuntime): Promise<AgentSet>;
 
 // Workflow definition (2 overloads: opts+handler, handler-only)
 export function workflow(
@@ -1073,19 +1276,22 @@ export type {
   AgentDefinition,
   AgentInput,
   AgentOutput,
+  AgentResult,
   AgentRunner,
+  AgentRuntime,
   AgentSet,
   ApprovalResult,
   Budget,
   CancelStore,
   CompleteArgs,
   CompleteResult,
-  ComputeSpec,
   ConnectorContext,
   ConnectorSpec,
   ContentBlock,
+  CreateRuntimeOptions,
   DefineToolSpec,
   DefineMcpSpec,
+  DispatchOptions,
   Environment,
   Logger,
   Message,
@@ -1093,19 +1299,25 @@ export type {
   ModelClient,
   ModelPricing,
   ModelSpec,
+  ModelStreamEvent,
   ModelTier,
   MountedTools,
   OAuthTokens,
+  PausedResult,
   Permissions,
+  RenderPlan,
   ResolvedSource,
+  RetryPolicy,
   RunContext,
   RunCursor,
   RunEvent,
   RunMessageRecord,
   RunOptions,
+  RunPaused,
   RunRecord,
   RunStatus,
   RunStore,
+  RunnerRegistry,
   SamplingParams,
   ScheduleRecord,
   ScheduleStore,
@@ -1116,6 +1328,7 @@ export type {
   SpanOutcome,
   SpanRecord,
   SpanStatus,
+  TaskDispatcher,
   TaskOptions,
   Tool,
   ToolCallRecord,
@@ -1141,17 +1354,19 @@ export { idempotencyKey, estimateCost };
 ### 7.2 `loadAgents` behavior
 
 ```ts
-async function loadAgents(dir?: string): Promise<AgentSet>;
+async function loadAgents(dir?: string, runtime?: AgentRuntime): Promise<AgentSet>;
 ```
 
 1. `dir` defaults to `"./agents"` relative to the project root.
-2. Scans `dir` for `*.md` files (non-recursive). Skips `_shared.md`.
-3. Parses each file: extracts YAML frontmatter and body.
-4. If `_shared.md` exists, loads it and merges into each definition.
-5. Loads `tools/` and `skills/` registries from sibling directories.
-6. Validates every frontmatter field. Fails fast on the first error.
-7. Resolves model spec (tier or raw string).
-8. Returns an `AgentSet` with `.get()`, `.has()`, `.all()`.
+2. `runtime` defaults to `await createRuntime()` (env-driven auto-detection — see §5.23).
+3. Scans `dir` for `*.md` files (non-recursive). Skips `_shared.md`.
+4. Parses each file: extracts YAML frontmatter and body.
+5. If `_shared.md` exists, loads it and merges into each definition.
+6. Loads `tools/` and `skills/` registries from sibling directories.
+7. Validates every frontmatter field. Fails fast on the first error.
+8. Resolves model spec (tier or raw string) and `plan` (must be a known `RenderPlan`).
+9. Binds every `Agent` to the `runtime` (model, store, tracer, runner registry, dispatcher).
+10. Returns an `AgentSet` with `.get()`, `.has()`, `.all()`.
 
 ### 7.3 `Agent.run` vs `Agent.task`
 
@@ -1159,20 +1374,52 @@ async function loadAgents(dir?: string): Promise<AgentSet>;
 |---|---|---|
 | Execution | In-process | Render Workflow task (isolated container) |
 | Use case | Lightweight steps, judges, local dev | Production parallelism, heavy compute |
-| Container | Shares the caller's process | Own container with `compute` spec |
+| Container | Shares the caller's process | Own container on the agent's `plan` |
 | Retries | None (caller manages) | Render Workflows retry policy |
 | Persistence | Same store as caller | Same store (Postgres in production) |
 | Tracing | Same trace context | Spans correlate via `runId` + `parentSpanId` |
 
-Both methods return `Promise<AgentOutput>` with the same shape. Pipeline code composes them freely:
+Both methods return `Promise<AgentOutput>` with the same shape. Pipeline code composes them freely (inside a handler, via `ctx.agents` — see §5.16):
 
 ```ts
 const findings = await Promise.all(
-  agents.get(["security", "performance", "ux"])
+  ctx.agents.get(["security", "performance", "ux"])
     .map(a => a.task({ patches }))
 );
-const decision = await agents.get("judge").run({ findings });
+const decision = await ctx.agents.get("judge").run({ findings });
 ```
+
+### 7.4 Testing utilities (`@render-agents/sdk/testing`)
+
+Because the runtime is injectable (§5.23), tests run the *real* loop against a mock model and an in-memory store — no network, no Postgres, no Render Workflows. Shipped as a subpath export (no extra package):
+
+```ts
+function mockModel(
+  handler: (args: CompleteArgs) => CompleteResult | Promise<CompleteResult>,
+): ModelClient;
+
+/** In-memory runtime for tests: memory store, provided/mock model, no dispatcher (so `.task()` falls back to `.run()`). */
+function createTestRuntime(opts?: Partial<CreateRuntimeOptions>): Promise<AgentRuntime>;
+```
+
+```ts
+import { loadAgents } from "@render-agents/sdk";
+import { mockModel, createTestRuntime } from "@render-agents/sdk/testing";
+
+const model = mockModel((args) => {
+  // Assert on args.system / args.tools / args.messages, and script the reply
+  // (text, tool_use sequences, or structured output) as a CompleteResult.
+  return { content: [{ type: "text", text: '{"decision":"approve"}' }], usage: { inputTokens: 10, outputTokens: 5 }, stopReason: "end_turn" };
+});
+
+const runtime = await createTestRuntime({ model });
+const agents = await loadAgents("./agents", runtime);
+
+const { data } = await agents.get("judge").run<{ decision: string }>({ findings: [] });
+expect(data?.decision).toBe("approve");
+```
+
+The programmable handler lets tests assert on what the agent sent and drive multi-turn tool-call flows deterministically. Record/replay of real provider responses is post-MVP.
 
 ---
 
@@ -1195,8 +1442,8 @@ The default runner (`@render-agents/engine`) executes this cycle:
 │  6. If stop_reason = end_turn → return text     │
 │  7. For each tool_use in response:              │
 │     a. Check idempotency → short-circuit if hit │
-│     b. Check permissions (allowed/denied)       │
-│     c. Check requireApproval → HITL gate        │
+│     b. Check requireApproval → HITL gate        │
+│     c. Validate input vs inputSchema            │
 │     d. Dispatch tool (tool span)                │
 │     e. Record tool call for idempotency         │
 │     f. Collect tool_result                      │
@@ -1214,7 +1461,7 @@ The default runner (`@render-agents/engine`) executes this cycle:
 | `maxCostUsd` | 10 | Error: "cost budget exhausted" |
 | `maxWallSeconds` | (none) | AbortSignal fires via `setTimeout` |
 
-Budgets are checked at the top of each iteration, before the LLM call. Cost is computed via `estimateCost(model, usage)` after each `complete()` call and accumulated on `RunRecord.totalCostUsd`.
+Budgets are **per agent invocation** (the `budget` block is an agent-level field). The default `maxCostUsd` is `10` per agent. Budgets are checked at the top of each iteration, before the LLM call. Cost is computed via `estimateCost(model, usage)` after each `complete()` call: it is accumulated against the agent invocation's running total for budget enforcement, and also added to the run-wide `RunRecord.totalCostUsd` for reporting/attribution.
 
 ### 8.3 Tool dispatch
 
@@ -1222,12 +1469,12 @@ Tools are dispatched sequentially within a turn. Parallel tool dispatch is a fut
 
 For each `tool_use` block:
 1. **Idempotency check** → call `ctx.checkIdempotency(toolCallId)`. If a stored result exists, return it immediately without re-executing. This makes checkpoint-resume and task retries safe for non-idempotent tools.
-2. **Permissions** → check `deniedTools` / `allowedTools`. Error result if denied.
-3. **Approval gate** → if `requireApproval` includes this tool name and the tool call has not been pre-approved, invoke `ctx.requestApproval()`:
-   - On approval: continue to dispatch.
-   - On denial: return error result.
-   - On pause (production HITL): write a **placeholder `tool_result`** for all pending `tool_use` blocks in this turn (prevents provider 400 errors on resume, since providers require all `tool_use` blocks to have matching results). Set run status to `"paused"`. Return `{ status: "paused", reason: "awaiting_approval" }`.
-4. **Lookup** → resolve tool by name in the mounted tools map. Error result if unknown.
+2. **Approval gate** → if `requireApproval` includes this tool name and the tool call has not been pre-approved, invoke `ctx.requestApproval()`:
+   - On approval (`{ approved: true }`): continue to dispatch.
+   - On denial (`{ approved: false }`): return error result.
+   - On pause (`{ status: "pending" }`, production HITL): write a **placeholder `tool_result`** for all pending `tool_use` blocks in this turn (prevents provider 400 errors on resume, since providers require all `tool_use` blocks to have matching results), set run status to `"paused"`, and throw `RunPaused` carrying the pending approval id(s). The runtime catch boundary marks the run paused and (in a workflow) lets the signal unwind the handler. A `PausedResult` is available to callers that inspect the boundary instead of relying on the throw.
+3. **Lookup** → resolve tool by name in the mounted tools map. Error result if unknown (e.g. the model hallucinated a tool not in `tools[]`).
+4. **Validate input** → validate the model's input against the tool's `inputSchema` (applies to local *and* MCP-sourced tools, against the MCP-advertised schema). On failure, return an **error `tool_result`** with the validation message so the model can self-correct — the loop does not crash.
 5. **Dispatch** → call `tool.invoke(input, ctx)` with the tool context.
 6. **Record** → call `ctx.recordToolCall(toolCallId, toolName, input, result)` for idempotency.
 7. **Wrap** → return as a `tool_result` content block.
@@ -1242,6 +1489,17 @@ When a run resumes after HITL pause or checkpoint:
 2. Find the last assistant message. If it contains `tool_use` blocks without matching `tool_result` blocks, these are **pending tool calls**.
 3. Re-dispatch pending tool calls through the normal dispatch path. The idempotency check (step 1 above) short-circuits any that already completed before the pause.
 4. Continue the loop from the next iteration.
+
+### 8.3.2 In-process approval modes
+
+When an agent runs in-process with no gateway to resolve approvals (local dev, `agent.run()` in a script), `requestApproval` follows the approval mode:
+
+| Mode | Trigger | Behavior on a gated tool |
+|---|---|---|
+| **Auto-approve** (default) | (default) | Approves the call, but **logs it and emits an `approval.auto` event + sets an `approval.auto = true` span attribute** on the tool span. Never silent — it's auditable in traces. |
+| **Strict** | `RENDER_AGENTS_STRICT_APPROVAL` set | Prompts on the terminal (`y/n`) when attached to a TTY. If non-interactive (no TTY), the run errors with `approval required, no resolver available`. |
+
+This keeps local iteration fast by default while making the bypass visible, and lets you exercise real approval gates locally with one env var. The production (gateway) path is unaffected — it always enforces via `ApprovalRequest` + pause.
 
 ### 8.4 Message persistence and checkpoint-resume
 
@@ -1261,11 +1519,96 @@ When a store is not available (in-memory mode for local dev), messages are held 
 The loop, tool dispatch, permissions, budget enforcement, message persistence, and all observable behavior are identical whether an agent runs via `agent.run()` (in-process) or `agent.task()` (Workflow task). Both write messages, tool calls, and spans to whatever store is available. The only differences are in the execution container:
 
 - `agent.run()`: shares the caller's process, no retries, no container isolation.
-- `agent.task()`: own container with `compute` spec, Render Workflows retries.
+- `agent.task()`: own container on the agent's `plan`, Render Workflows retries.
 
 When Postgres is available (production, or local dev with `DATABASE_URL` set), both modes persist to it. When Postgres is not available (local dev without a database), both modes fall back to the in-memory store. The persistence behavior follows the store, not the execution mode.
 
 Pipeline code does not need to know or care which mode is in use. The same agent markdown, the same tool set, the same runner, the same store, the same output shape.
+
+### 8.6 Task dispatch — Render Workflows mapping
+
+`agent.task()` is auto-wired onto Render Workflows (`@renderinc/sdk/workflows`). Authors never write a `task()` definition.
+
+**Registration.** Render binds compute to a `plan` at task-registration time and does not support per-run plan overrides. So at workflow-service startup the SDK registers a **bounded set of generic dispatch tasks, one per plan referenced across the loaded agents** (plus the default plan):
+
+```ts
+// Registered by the SDK, not the user — one per referenced plan:
+//   agent@standard, agent@pro, ...
+task({ name: `agent@${plan}`, plan, retry, timeoutSeconds }, agentTaskHandler);
+```
+
+Each `agentTaskHandler(agentName, input, dispatchMeta)` reloads the agent from the deployed image by name (only `input` is serialized; definitions are re-loaded, never shipped) and runs it through the default runner.
+
+**Dispatch.** `agent.task(input)` resolves the effective plan from the agent's frontmatter `plan` (or the default) and dispatches `(agentName, input)` to the matching `agent@<plan>` task:
+
+- **Inside a workflow handler** → calls the registered task function directly, which Render executes as a durable **chained run** on its own instance and returns a promise for the result.
+- **From the gateway / outside a workflow** → uses the Render client `workflows.runTask(id, input)` (or `startTask` + `result.get()`).
+- **No workflow server detected** (`RENDER_SDK_SOCKET_PATH` / `RENDER_USE_LOCAL_DEV` unset) → transparently falls back to in-process `.run()`.
+
+**Render Workflows is a hard production requirement.** The in-process fallback above is a **local-dev convenience only** (and the basis for the testing runtime in §7.4) — it is not a production degraded mode. A deployed workflow/gateway service is expected to have the Render Workflows dispatcher available; production parallelism, container isolation, and retries depend on it.
+
+**Serialization.** Task input and output must be JSON-serializable. Non-serializable input throws at dispatch time.
+
+**Idempotent dispatch.** Each dispatch carries a deterministic key `SHA-256(runId + agentName + callSeq)`. On handler re-execution (resume, or a manual retry), re-dispatch returns the existing child run's result instead of starting a new run. The `callSeq` is the per-handler dispatch ordinal, so control flow must be deterministic (see §8.7).
+
+### 8.7 Workflow handler replay & determinism
+
+Render's durability is **per task**, not Temporal-style deterministic replay: a task runs once, returns a value, and is deprovisioned; on failure (no return) the *whole task re-runs* from the top with no memoization. The `workflow()` handler is itself the root task, so:
+
+1. **Root handler `retries` default to 0.** A failed handler is not silently re-executed (which would duplicate side effects). The run is marked `failed`; durability and resumption come from child `agent.task()` runs plus Postgres checkpoint state, not from blind handler re-runs.
+2. **Deterministic, side-effecting, or non-deterministic work goes in `ctx.step(name, fn)`.** Step results are memoized to Postgres by `(runId, name)`. On any handler re-execution (HITL resume, explicit retry), completed steps short-circuit to their stored result. Plain function calls in the handler body are *not* memoized and will re-run.
+3. **`agent.task()` dispatches are memoized** via the deterministic key in §8.6 — completed child runs are not re-dispatched on re-execution.
+4. **HITL pause is a deliberate re-execution.** When a child agent pauses for approval, the runner throws `RunPaused`, which bubbles out of the handler; the runtime marks the run `paused`. On approval, the run resumes by re-executing the handler: prior `ctx.step` results and completed `agent.task()` dispatches replay from storage, and the previously-paused agent now returns its completed result.
+
+**Author guidance (documented contract):**
+
+- Handler control flow must be deterministic (the dispatch/step ordinals depend on it).
+- All side effects must be wrapped in `ctx.step()` or performed inside an `agent.task()`.
+- Do not read wall-clock time, randomness, or external mutable state directly in the handler body — wrap such reads in `ctx.step()` so they are captured once.
+
+```ts
+export default workflow(async (ctx) => {
+  const patches = await ctx.step("prepare-diff", () => prepareDiff(ctx));
+
+  const findings = await Promise.all(
+    ctx.agents.get(["security", "performance"]).map(a => a.task({ patches }))
+  );
+
+  const decision = await ctx.agents.get("judge").run({ findings });
+
+  return ctx.step("post-review", () => postReview(ctx, decision));
+});
+```
+
+**Resume semantics (you always get the result before downstream code).** A paused `agent.task()` does *not* resolve with a partial or empty value. The `await` either resolves with the real result or throws `RunPaused`, which unwinds the handler — nothing after the paused `await` runs on that execution. The *Render task instance* is deprovisioned during the pause (so we don't pin compute waiting on a human), but from the handler's perspective the call simply hasn't returned yet. On approval the run resumes by re-executing the handler with completed work replayed from storage, so execution fast-forwards to the exact paused point — now with its answer — and continues. This is the same "resume at the await via replay" technique durable engines use; there is no code-visible state where control flow proceeds without a needed response.
+
+```ts
+const [sec, perf] = await Promise.all([
+  ctx.agents.get("security").task({ patches }),    // completes
+  ctx.agents.get("performance").task({ patches }), // pauses for approval → throws RunPaused
+]);
+// Nothing below runs until BOTH resolve.
+// On resume: security replays from store (not re-run); performance returns its approved result.
+const decision = await ctx.agents.get("judge").run({ sec, perf });
+```
+
+### 8.8 Structured output
+
+When an agent declares an `output` JSON Schema, the runner returns validated structured data in `AgentOutput.data` in addition to `text`:
+
+1. On the final model turn, the runner sets `CompleteArgs.responseFormat = { type: "json_schema", schema }`. Providers with native structured output (e.g. OpenAI `response_format`, Anthropic tool/JSON modes) enforce it directly; providers without it fall back to a JSON instruction appended to the system prompt.
+2. The returned content is parsed and validated against the schema. On success, `AgentOutput.data` is populated (and `text` holds the raw JSON). On validation failure, the runner retries up to a small bounded number of times (feeding the validation error back to the model); if it still fails, the run errors.
+3. Agents **without** an `output` schema are unchanged: `data` is `undefined` and only `text` is returned.
+
+Typed access is via the generic parameter:
+
+```ts
+type Decision = { decision: "approve" | "reject"; reasons?: string[] };
+const { data } = await ctx.agents.get("judge").run<Decision>({ findings });
+if (data?.decision === "approve") { /* ... */ }
+```
+
+The schema is part of the agent markdown, so structured output is portable and declared in one place — composing agents pass typed `data` rather than parsing each other's prose.
 
 ---
 
@@ -1299,7 +1642,7 @@ workflow run (trace root)
 |---|---|---|
 | Workflow run | `workflow` | workflow name, trigger type, input summary |
 | Deterministic step | `step` | step name |
-| Agent invocation | `agent` | agent name, model, final token usage, iteration count |
+| Agent invocation | `agent` | agent name, **agent version**, model, final token usage, iteration count |
 | LLM call | `llm` | model, input tokens, output tokens, stop reason, latency ms |
 | Tool call | `tool` | tool name, latency ms, success/error |
 
@@ -1312,6 +1655,19 @@ Each LLM span carries `inputTokens`, `outputTokens`. Cost is computed from the m
 ---
 
 ## 10. Store — Postgres Schema
+
+### 10.0 Migration order & application
+
+Migrations are applied by `RunStore.init()` under a Postgres advisory lock (ported from the harness), in a single canonical **dependency order** so all foreign keys resolve:
+
+1. `sessions`
+2. `conversations` (FK → `sessions`)
+3. `runs` (FK → `conversations`)
+4. `spans`, `tool_calls`, `run_messages`, `workflow_steps`, `approval_requests`, `schedules` (FK → `runs`)
+5. `messages` (FK → `conversations`, `runs`)
+6. `oauth_connections` (no FKs)
+
+The numbered subsections below document each table for reference; **they are not the application order** (the proposal's `001_runs, 002_spans, 003_sessions` numbering is superseded — creating `runs` before `conversations` would violate the FK). Each `CREATE TABLE` uses `IF NOT EXISTS` and is idempotent.
 
 ### 10.1 `runs` table
 
@@ -1328,6 +1684,7 @@ CREATE TABLE runs (
   cursor          JSONB,
   conversation_id TEXT REFERENCES conversations(id),
   user_id         TEXT,
+  agent_version   TEXT,
   started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at     TIMESTAMPTZ
 );
@@ -1500,12 +1857,27 @@ CREATE TABLE schedules (
 );
 ```
 
-### 10.11 Retention
+### 10.11 `workflow_steps` table
+
+Memoized results of `ctx.step(name, fn)` calls. The workflow runtime checks this table before running a step — if a result exists for `(run_id, name)`, it short-circuits. This is what makes handler re-execution (HITL resume / retry) safe for side-effecting steps (§8.7).
+
+```sql
+CREATE TABLE workflow_steps (
+  run_id     TEXT NOT NULL REFERENCES runs(id),
+  name       TEXT NOT NULL,
+  result     JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, name)
+);
+```
+
+### 10.12 Retention
 
 Span records accumulate fast. Default retention policy:
 
 - Span records: 30 days, configurable via `SPAN_RETENTION_DAYS`
 - Run messages: 30 days, follows span retention (same lifecycle)
+- Workflow step records: 30 days, follows run-message lifecycle
 - Tool call records: 30 days, follows span retention
 - Run records: 90 days, configurable via `RUN_RETENTION_DAYS`
 - Sessions/conversations: no automatic expiry (user data)
@@ -1562,8 +1934,8 @@ Run progress is streamed via Server-Sent Events over Postgres `LISTEN/NOTIFY`.
 - `run.started`, `run.completed`, `run.failed`, `run.paused`, `run.cancelled`
 - `agent.started`, `agent.completed`
 - `tool.called`, `tool.completed`
-- `text.delta` (streaming text output)
-- `approval.requested`, `approval.resolved`
+- `text.delta` (token-level streaming output — **post-MVP**; requires `ModelClient.stream`. Until implemented, text is delivered per-turn as a full `agent.completed`/message event)
+- `approval.requested`, `approval.resolved`, `approval.auto` (auto-approved in-process; also recorded as an `approval.auto` span attribute)
 
 **Conversation streams** stay open across runs — a new turn creates a new run, and the stream picks up events from the new run automatically.
 
@@ -1624,6 +1996,7 @@ There is no project-level config file. Each concern has its own home:
 - **Retention policy** → `SPAN_RETENTION_DAYS`, `RUN_RETENTION_DAYS` env vars
 - **Gateway port** → `PORT` env var
 - **Auth** → `WORKFLOW_API_KEY` env var
+- **Local strict approvals** → `RENDER_AGENTS_STRICT_APPROVAL` env var (§8.3.2)
 
 This avoids a dedicated config file that duplicates things already expressed in markdown frontmatter, `package.json`, or environment variables.
 
@@ -1652,8 +2025,8 @@ This spec is implemented across focused sprints. Each sprint has its own spec th
 
 | Sprint | Spec | Scope | Depends on |
 |---|---|---|---|
-| 01 | `01-kernel.md` | Package scaffolding, `loadAgents`, `defineTool`, `defineMcpSource`, default runner, `agent.run()`, local dev CLI, in-memory store | — |
-| 02 | `02-workflows.md` | `agent.task()` backed by Render Workflows, `workflow()` helper, compute isolation, retries | 01 |
+| 01 | `01-kernel.md` | Package scaffolding, `createRuntime`, `loadAgents`, `defineTool`, `defineMcpSource`, default runner (+ retry, input validation, structured output), `agent.run()`, local dev CLI, in-memory store, testing utilities (`/testing`) | — |
+| 02 | `02-workflows.md` | `agent.task()` auto-wired to Render Workflows (plan-tier dispatch), `workflow()` helper, `ctx.step` memoization, handler determinism, retries | 01 |
 | 03 | `03-observability.md` | OTel spans, Postgres store, tracer, span retention, trace UI | 01, 02 |
 | 04 | `04-gateway.md` | Web gateway, webhook discovery, SSE streaming, runs API | 02, 03 |
 | 05 | `05-sessions-hitl.md` | Sessions, conversations, HITL approval enforcement, multi-turn | 04 |
@@ -1681,6 +2054,11 @@ These require resolution before or during implementation. Sprint specs should re
 | 11 | Schedule backend | (a) Render Cron in render.yaml (b) Runtime API (c) pg-boss cron | (a) Defer runtime schedules — static Render Cron for MVP |
 | 12 | Operator UI in MVP? | (a) Dev-mode trace UI only (from template) (b) Port harness operator UI (c) Defer entirely | (a) Trace UI only — lightweight, solves debugging |
 | 13 | `workflow()` naming | (a) Keep `workflow()` (b) `pipeline()` (c) `defineWorkflow()` (d) Bare export, no helper | (a) Keep — carries config, matches directory/route naming |
+| 14 | Runtime / composition root | (a) `createRuntime()` + `loadAgents(dir, runtime)` (b) global `configure()` (c) call-time deps | (a) — env-auto-detected `AgentRuntime`, shared by gateway + workflow service (§5.23) |
+| 15 | `agent.task()` compute model | (a) `cpu`/`memory` + per-run override (b) optional `plan` enum, no override | (b) — Render binds compute to a `plan` at registration; optional frontmatter `plan`, default plan otherwise |
+| 16 | Task dispatch wiring | (a) user writes `task()` (b) auto-wired plan-tier dispatch tasks | (b) — SDK registers `agent@<plan>` tasks; deterministic dispatch keys; in-process fallback locally (§8.6) |
+| 17 | Workflow handler durability | (a) Render retries whole handler (b) `retries=0` + `ctx.step` memo + child-task durability | (b) — no deterministic replay in Render; memoize via `ctx.step` and idempotent dispatch (§8.7) |
+| 18 | HITL pause representation | (a) binary `ApprovalResult` (b) thrown `RunPaused` + `ApprovalResult` pending + `PausedResult` | (b) — control-flow signal that unwinds, plus inspectable result at the boundary |
 
 ---
 
@@ -1697,15 +2075,18 @@ The template is the closer starting point for the SDK's core architecture. Its e
 
 | Spec area | Template source | Adaptation |
 |---|---|---|
-| **Markdown agent loading + validation** | `src/engine/parse-agents.ts` | Extend frontmatter schema (add `compute`, `runner`, `permissions.requireApproval`). Add `_shared.md` merge. Wire Zod validation for fail-fast. |
-| **Agent types** (`AgentDefinition`, `AgentSet`, `AgentTask`) | `src/engine/types/agent.ts` | Rename `AgentTask` → `Agent`. Add `.task()` alongside `.run()`. Add `ComputeSpec`, `runner` field. |
+| **Markdown agent loading + validation** | `src/engine/parse-agents.ts` | Extend frontmatter schema (add `plan`, `runner`, `permissions.requireApproval`). Add `_shared.md` merge. Wire Zod validation for fail-fast. |
+| **Agent types** (`AgentDefinition`, `AgentSet`, `AgentTask`) | `src/engine/types/agent.ts` | Rename `AgentTask` → `Agent`. Add `.task()` alongside `.run()`. Add `plan` (`RenderPlan`), `runner` field. Bind agents to `AgentRuntime` (§5.23). |
+| **Runtime / composition root** (`createRuntime`, `AgentRuntime`, `TaskDispatcher`) | *(new — no direct source)* | New code. Auto-detect store/model/dispatcher from env. Shared by gateway + workflow service. |
+| **Task dispatch** (`agent.task()` → Render Workflows) | *(new — wraps `@renderinc/sdk/workflows`)* | Auto-register plan-tier `agent@<plan>` tasks; chained-run dispatch inside handlers, `client.runTask` from gateway, in-process fallback locally. Deterministic dispatch keys. |
+| **Workflow handler + `ctx.step`** | `src/workflows/code-review/index.ts` | Add `ctx.step()` memoization (`workflow_steps` table), `retries=0` default, determinism contract (§8.7). |
 | **Tool system** (`defineTool`, `defineMcpSource`, `ToolSource`) | `src/engine/tool.ts`, `types/tool.ts` | Direct lift. Add `ConnectorSpec` support. |
 | **Skill system** (`SkillMetadata`, `loadSkills`, `load_skill` tool) | `src/engine/skills.ts`, `types/skill.ts` | Direct lift. |
 | **LLM loop** (`runLoop`) | `src/engine/loop.ts` | Extend with: cancellation check, idempotency, HITL pause (placeholder tool_result), message persistence, cost accumulation. Core iterate/call/dispatch structure stays. |
 | **Model client + tiers** | `src/engine/model.ts`, `model-tiers.ts` | Direct lift. Add `estimateCost`. |
 | **Environment** (tool registry, mount/dispose) | `src/engine/environment.ts`, `types/environment.ts` | Direct lift. |
 | **Tracing** (`Tracer`, `SpanInfo`) | `src/engine/store/tracer.ts`, `types/trace.ts` | Direct lift. Add `"workflow"` and `"step"` span kinds. |
-| **Store** (RunStore, memory + Postgres) | `src/engine/store/` | Extend schema: add `tool_calls`, `total_cost_usd`, `cursor`, `conversation_id`, `user_id`. Add `run_messages` table. |
+| **Store** (RunStore, memory + Postgres) | `src/engine/store/` | Extend schema: add `tool_calls`, `total_cost_usd`, `cursor`, `conversation_id`, `user_id`. Add `run_messages` and `workflow_steps` tables (+ `getStepResult`/`putStepResult`). |
 | **Workflow composition** | `src/workflows/code-review/index.ts` | Reference for `workflow()` helper design. The code-review pipeline becomes the scaffolder's default example. |
 | **Gateway + webhooks** | `src/main.ts`, `src/server/` | Adapt to Hono. Add sessions, HITL, OAuth, schedule routes (from harness). |
 | **Trace UI** | `src/ui/` | Direct lift as dev-mode trace viewer. |
@@ -1737,7 +2118,7 @@ The harness provides production-grade infrastructure that the template lacks. Th
 |---|---|
 | **Four runtime adapters** (`runtime-web`, `runtime-worker`, `runtime-cron`, `runtime-workflows`) | Replaced by one model: `agent.run()` (in-process) + `agent.task()` (Workflow). Cron and webhooks are trigger types, not runtimes. |
 | **Capability packs** (`definePack`, namespace mangling) | Replaced by convention-discovered tools with flat names and hard-error collisions. The `ConnectorSpec` covers the inbound-webhook contribution packs provided. |
-| **`render-harness.yaml`** config schema | Replaced by `render-agents.yaml` + markdown frontmatter. Agent identity lives in the agent file, not a config registry. |
+| **`render-harness.yaml`** config schema | No project-level config file (Open Q #4c). Replaced by `package.json` (project metadata), markdown frontmatter (agent config), `render.yaml` (deploy), and env vars (infra). Agent identity lives in the agent file, not a config registry. |
 | **YAML agent definitions** | Replaced by markdown-first authoring. |
 | **Gallery / registry index** | Deferred. The scaffolder generates projects directly; a registry of templates is a future concern. |
 | **Operator UI** (`@render-harness/ui`) | Deferred to post-MVP. The trace UI from the template serves as the initial dev-mode viewer. |
@@ -1748,9 +2129,108 @@ The harness provides production-grade infrastructure that the template lacks. Th
 
 1. **Port contracts, not code.** The harness is callback-heavy and config-driven. Extract the logic, implement it against our interfaces.
 2. **Flatten the dependency graph.** The harness has 10+ packages with complex cross-deps. Our monorepo has 4 packages with a clean tree.
-3. **Delete the YAML layer.** Every place the harness reads from `render-harness.yaml` or `AgentDefinition` built by `defineFromConfig`, we read from markdown frontmatter or `render-agents.yaml`.
+3. **Delete the YAML layer.** Every place the harness reads from `render-harness.yaml` or `AgentDefinition` built by `defineFromConfig`, we read from markdown frontmatter (agent config) or `package.json` (project metadata). There is no project-level config file.
 4. **Keep the SQL.** The harness's migration patterns (advisory lock, idempotent `CREATE TABLE IF NOT EXISTS`, index naming) are production-proven.
 5. **Test against the harness's edge cases.** The harness handles: concurrent conversation turns, mid-loop crashes, OAuth token races, SSRF via DNS rebinding, budget overflow on the last turn. These are the test cases we must not lose.
+
+---
+
+## 17. Future Considerations
+
+Forward-looking extensions that are **not in MVP scope** but whose seams we want to preserve so we don't paint ourselves into a corner. These define extension points and park open questions; they are not yet binding contracts.
+
+### 17.1 Sandboxes (code execution & development)
+
+[Render Sandboxes](https://render.com/) (forthcoming) are isolated, long-lived execution environments for code generation, testing, and interactive development. The goal is to let an agent check out a repo, run commands, start servers, and iterate — locally identical to production.
+
+**Design principle: a Sandbox is a stateful resource, not a stateless tool.** It is exposed to the *model* as tools, but backed by a runtime-managed resource with an explicit lifecycle. Two orthogonal "compute" concepts must stay distinct:
+
+- **Agent compute** — the container the agent *loop* runs in → already handled by `plan` / `agent.task()` (§8.6).
+- **Sandbox** — the workspace the agent *operates on* (filesystem, exec, ports) → a separate resource driven via tools.
+
+A coding agent runs its loop in a task container but checks out a repo and runs builds *inside a Sandbox*. Different lifetimes, different scaling.
+
+**Proposed seam — `SandboxProvider` on `AgentRuntime`** (optional, env-detected, mirroring `dispatcher`):
+
+```ts
+interface AgentRuntime {
+  // ...existing...
+  readonly sandboxes?: SandboxProvider;
+}
+
+interface SandboxProvider {
+  acquire(opts: SandboxAcquireOptions): Promise<Sandbox>;
+}
+
+interface SandboxAcquireOptions {
+  scope: "ephemeral" | "run" | "session";
+  /** Key for reattaching a session-pinned sandbox (conversationId/sessionId). */
+  key?: string;
+  /** Optional snapshot to restore from. */
+  snapshotId?: string;
+  plan?: RenderPlan;
+}
+
+interface Sandbox {
+  readonly id: string;
+  exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number }): Promise<ExecResult>;
+  writeFile(path: string, content: string): Promise<void>;
+  readFile(path: string): Promise<string>;
+  exposePort(port: number): Promise<{ url: string }>;   // preview URLs
+  snapshot(): Promise<{ snapshotId: string }>;
+  dispose(): Promise<void>;
+}
+
+interface ExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+```
+
+**Model-facing surface — a built-in sandbox tool source.** Declared with the existing authoring model (`tools: [sandbox]` → `sandbox__exec`, `sandbox__write_file`, `sandbox__read_file`, `sandbox__expose_port`). It is a `ToolSource` whose `resolve(env)` acquires the sandbox and whose `ResolvedSource.close()` disposes it — so it inherits permissions/HITL (`requireApproval: [sandbox__exec]`), input validation, tracing, and idempotency for free, and is MCP-mirrorable for the Python SDK.
+
+**Context handle.** `ctx.sandbox()` on `ToolContext`/`RunContext` so deterministic `ctx.step()`s and custom tools can use the same sandbox the model is driving (e.g. a `prepare-repo` step clones; the agent then operates on it).
+
+**Scope model:**
+
+| Scope | Lifetime | Use case |
+|---|---|---|
+| Ephemeral | per tool call | one-off `exec` |
+| Run-scoped (default) | acquired on first use, disposed at run end | code review running tests |
+| Session-pinned | persisted handle, reattaches across runs | a *development* agent with a durable workspace |
+
+Run-scoped reuse falls out of the `ResolvedSource` lifecycle. Session-pinned requires new state: store the sandbox id (and last snapshot) keyed by `conversationId`/`sessionId` in Postgres so the next run reattaches instead of starting clean.
+
+**Sketch:**
+
+```markdown
+---
+model: claude-sonnet-4-6
+tools: [github, sandbox]
+permissions:
+  requireApproval: [sandbox__exec]
+budget:
+  maxSandboxSeconds: 1800
+---
+
+You are a coding agent. Clone the repo, implement the change, run the tests...
+```
+
+### 17.2 Open questions (Sandboxes)
+
+| # | Question | Options / notes |
+|---|---|---|
+| S1 | Replay/resume when a sandbox was deprovisioned during a pause | Tool idempotency already prevents re-`exec` on resume, but workspace state may be gone. Use `snapshot()`/restore on resume? Auto-snapshot on pause? |
+| S2 | Budget & cost attribution for Sandbox minutes | Add `budget.maxSandboxSeconds` + a sandbox cost line in attribution (Render bills Sandbox minutes). Pricing source? |
+| S3 | Secrets/OAuth injection into the sandbox env | How do per-user tokens (`ToolContext.connection`) reach processes running inside the sandbox, safely? |
+| S4 | Tracing granularity | Dedicated `sandbox` span kind vs sandbox attributes on `tool` spans (sandbox id, command, exit code). |
+| S5 | Cleanup guarantees | Dispose on run completion, cancel, and failure; reconcile orphaned sandboxes (TTL sweeper). |
+| S6 | Session-pinned persistence model | Where the reattach handle/snapshot lives (sessions table vs a `sandboxes` table); eviction policy. |
+| S7 | Sandbox plan vs agent plan | Does the sandbox get its own `RenderPlan`, independent of the agent's task plan? |
+| S8 | Relationship to the `Environment` abstraction (§5.8) | Keep distinct, or unify sandbox handle under `Environment`? |
+
+These are deferred until Render Sandboxes is available; the `SandboxProvider` seam and the sandbox tool-source convention are the only commitments needed now to keep MVP work unblocked.
 
 ---
 
