@@ -1326,7 +1326,7 @@ export { idempotencyKey, estimateCost };
 export type { /* …all §5 types… */ };
 ```
 
-Beyond the functions above, `@render-agents/sdk` re-exports every type defined in §5 from its package root (`RRunPaused` and `idempotencyKey`/`estimateCost` are the only runtime — non-type — exports). The `@render-agents/sdk/testing` subpath (§7.4) ships `mockModel` and `createTestRuntime` separately.
+Beyond the functions above, `@render-agents/sdk` re-exports every type defined in §5 from its package root; those definitions are canonical, so they aren't re-enumerated here. (`RunPaused` is a class, so it is also a runtime export, not type-only.) The `@render-agents/sdk/testing` subpath (§7.4) ships `mockModel` and `createTestRuntime` separately.
 
 ### 7.2 `loadAgents` behavior
 
