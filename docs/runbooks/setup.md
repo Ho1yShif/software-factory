@@ -238,7 +238,7 @@ The user confirms installation on every exact configured repository.
 ### Agent action
 
 Explain that [`render.yaml`](../../render.yaml) creates paid resources in
-Oregon:
+Oregon, in the `production` environment of a `software-factory` project:
 
 - `factory-gateway`, a Starter web service; and
 - `factory-workflows`, a Workflows service.

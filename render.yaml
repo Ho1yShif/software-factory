@@ -1,43 +1,47 @@
-# software-factory: two services.
+# software-factory: two services in a software-factory project.
 # - factory-gateway: verifies GitHub webhooks and starts the matching Workflows task.
 # - factory-workflows: runs every task (agents, snapshot refresh, cancel). It has no `repo` field, so it
 #   deploys from the same repository as this Blueprint, including forks.
 # Run and agent telemetry is logged as JSON lines; find it in each service's logs or a log stream.
 
-services:
-  - type: web
-    name: factory-gateway
-    region: oregon
-    runtime: node
-    plan: starter
-    buildCommand: npm ci
-    startCommand: npm run start:gateway
-    healthCheckPath: /ready
-    envVars:
-      - key: GITHUB_WEBHOOK_SECRET
-        sync: false
-      - key: RENDER_API_KEY
-        sync: false
-      - key: RENDER_WORKFLOW_SLUG
-        fromService:
-          type: workflow
-          name: factory-workflows
-          property: slug
+projects:
+  - name: software-factory
+    environments:
+      - name: production
+        services:
+          - type: web
+            name: factory-gateway
+            region: oregon
+            runtime: node
+            plan: starter
+            buildCommand: npm ci
+            startCommand: npm run start:gateway
+            healthCheckPath: /ready
+            envVars:
+              - key: GITHUB_WEBHOOK_SECRET
+                sync: false
+              - key: RENDER_API_KEY
+                sync: false
+              - key: RENDER_WORKFLOW_SLUG
+                fromService:
+                  type: workflow
+                  name: factory-workflows
+                  property: slug
 
-  - type: workflow
-    name: factory-workflows
-    region: oregon
-    runtime: node
-    buildCommand: npm ci
-    startCommand: npm run start:workflows
-    envVars:
-      - key: RENDER_API_KEY
-        sync: false
-      - key: RENDER_WORKSPACE_ID
-        sync: false
-      - key: GITHUB_APP_ID
-        sync: false
-      - key: GITHUB_APP_PRIVATE_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
+          - type: workflow
+            name: factory-workflows
+            region: oregon
+            runtime: node
+            buildCommand: npm ci
+            startCommand: npm run start:workflows
+            envVars:
+              - key: RENDER_API_KEY
+                sync: false
+              - key: RENDER_WORKSPACE_ID
+                sync: false
+              - key: GITHUB_APP_ID
+                sync: false
+              - key: GITHUB_APP_PRIVATE_KEY
+                sync: false
+              - key: ANTHROPIC_API_KEY
+                sync: false

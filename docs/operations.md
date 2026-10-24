@@ -7,7 +7,8 @@ Use this guide after completing the [Quickstart](quickstart.md).
 While a task is running, its issue or pull request has `factory:working`. The
 factory's status comment shows progress, the current run ID, and final links.
 
-Find that run under `factory-workflows` in the Render Dashboard to inspect
+Find that run under `factory-workflows`, in the `software-factory` project in
+the Render Dashboard, to inspect
 logs, inputs, and its result.
 
 Every task run ends with a `run.finished` JSON line, and every agent run with

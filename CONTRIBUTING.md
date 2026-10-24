@@ -174,8 +174,9 @@ The factory keeps no database: GitHub and Render Workflows hold the state it
 needs, and telemetry goes to logs. When a feature needs its own data, such as
 a spec library, budgets, or run history you query:
 
-1. Add a Render Postgres database to `render.yaml` and wire `DATABASE_URL`
-   into the services that need it with `fromDatabase`.
+1. Add a Render Postgres database to the `production` environment's
+   `databases` list in `render.yaml`, and wire `DATABASE_URL` into the
+   services that need it with `fromDatabase`.
 2. Run migrations from the gateway's `preDeployCommand`, so each deploy
    migrates before new code starts.
 3. Use the internal connection string on Render. The external one is for

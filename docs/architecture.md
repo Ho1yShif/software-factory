@@ -17,7 +17,7 @@ flowchart LR
   Snapshot -.->|restore| Sandbox
 ```
 
-The Blueprint creates two services:
+The Blueprint creates two services in a `software-factory` project:
 
 - **Gateway** verifies GitHub webhooks and maps each delivery to one task.
 - **Workflows** runs the claiming tasks, agents, cancellation, snapshot refresh, and
