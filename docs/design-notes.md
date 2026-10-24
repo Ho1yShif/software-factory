@@ -1,6 +1,6 @@
 # Design notes
 
-These are the reusable ideas behind Software Factory. They are explanatory,
+These are the reusable ideas behind software-factory. They are explanatory,
 not required for deployment or operation.
 
 ## Let existing systems own their state

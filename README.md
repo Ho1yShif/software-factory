@@ -1,6 +1,6 @@
-# Software Factory
+# software-factory
 
-Software Factory turns a labeled GitHub issue into an approved specification,
+software-factory turns a labeled GitHub issue into an approved specification,
 a verified draft pull request, and an automated code review. People approve
 every transition; the factory never approves or merges changes.
 

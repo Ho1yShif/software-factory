@@ -1,12 +1,12 @@
 # Setup runbook
 
-Use this runbook when helping someone deploy Software Factory for the first
+Use this runbook when helping someone deploy software-factory for the first
 time. Follow it in order. Do not claim setup is complete until `doctor`
 passes for both services and a labeled issue produces a factory status comment.
 
 ## Goal
 
-Deploy Software Factory from the user's fork, connect it to one GitHub
+Deploy software-factory from the user's fork, connect it to one GitHub
 repository, and complete one Triage run.
 
 ## Success criteria
@@ -58,7 +58,7 @@ Render—not in chat, issues, commits, or command output:
 
 ### Agent action
 
-Confirm the current directory is the Software Factory root and inspect:
+Confirm the current directory is the software-factory root and inspect:
 
 - `.node-version`;
 - `package.json`;
@@ -400,7 +400,7 @@ disposable issue in a configured test repository.
 Suggested issue:
 
 ```text
-Title: Software Factory setup smoke test
+Title: software-factory setup smoke test
 
 Confirm the repository can be inspected and return a minimal specification.
 Do not request a code change.
@@ -412,7 +412,7 @@ when the user has approved CLI writes:
 ```bash
 gh issue create \
   --repo <owner/name> \
-  --title "Software Factory setup smoke test" \
+  --title "software-factory setup smoke test" \
   --body "Confirm the repository can be inspected and return a minimal specification. Do not request a code change."
 
 gh issue edit <number> \
@@ -440,7 +440,7 @@ If the status comment never appears, use
 Report setup using this format without including secrets:
 
 ```text
-Software Factory setup: complete
+software-factory setup: complete
 
 Fork: <URL>
 Configured repositories: <owner/name, ...>

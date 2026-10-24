@@ -1,6 +1,6 @@
 # Architecture
 
-Software Factory separates model-directed work from authority. Agents inspect
+software-factory separates model-directed work from authority. Agents inspect
 and modify code inside short-lived Render Sandboxes; trusted Workflows code
 decides what may be written to GitHub.
 

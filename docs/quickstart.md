@@ -47,7 +47,7 @@ directly in `.env` or the Render Dashboard.
 Open the fork in your coding agent and ask:
 
 ```text
-Set up Software Factory by following docs/runbooks/setup.md.
+Set up software-factory by following docs/runbooks/setup.md.
 Configure <owner/repository> using base branch <branch>.
 Stop at every human checkpoint and do not expose secrets.
 ```

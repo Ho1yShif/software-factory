@@ -1,4 +1,4 @@
-# Software Factory: two services.
+# software-factory: two services.
 # - factory-gateway: verifies GitHub webhooks and starts the matching Workflows task.
 # - factory-workflows: runs every task (agents, snapshot refresh, cancel). It has no `repo` field, so it
 #   deploys from the same repository as this Blueprint, including forks.
