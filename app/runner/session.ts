@@ -200,8 +200,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
 					onAccepted: (output) => {
 						submission = { output };
 					},
-					onRejected: (attempts) => {
-						if (attempts >= MAX_SUBMIT_ATTEMPTS) stop({ code: "invalid_submission", message: `${SUBMIT_TOOL} was rejected ${attempts} times` });
+					onRejected: (attempts, problems, fields) => {
+						if (attempts < MAX_SUBMIT_ATTEMPTS) return;
+						// Schema paths, rule names, and field names only: TypeBox's errors don't quote the submitted values.
+						const last = problems.slice(0, 5).join("; ");
+						const names =
+							fields
+								.slice(0, 20)
+								.map((f) => f.slice(0, 40))
+								.join(", ") || "none";
+						stop({ code: "invalid_submission", message: `${SUBMIT_TOOL} was rejected ${attempts} times; last: ${last}; submitted fields: ${names}` });
 					},
 				}),
 			],
