@@ -25,7 +25,6 @@ export async function cancelRun(
 	const gh = deps.gh ?? githubFor(repo);
 	const { traceId, runId } = traceIds(ctx);
 	const event = { traceId, runId, repo: repo.fullName, subject: `${input.kind}#${input.number}` };
-	await emit({ ...event, type: "run.started", payload: { stage: TASKS.cancel, actor: input.actor } });
 
 	const result = await (async (): Promise<CancelResult> => {
 		if (!(await checkPermission(gh, input.actor))) {
@@ -36,7 +35,8 @@ export async function cancelRun(
 			return { cancelled: false, reason: "permission_denied" };
 		}
 		const current = await readStatus(gh, input.number);
-		if (!current || !(await stopRun(deps.runs ?? workflowRuns(), current.data))) {
+		const stop = { repo: repo.fullName, subject: event.subject, by: runId, outcome: "cancelled" } as const;
+		if (!current || !(await stopRun(deps.runs ?? workflowRuns(), current.data, stop))) {
 			await gh.createComment(input.number, `@${input.actor} no factory run is in progress here.`);
 			return { cancelled: false, reason: "nothing_running" };
 		}
@@ -46,7 +46,7 @@ export async function cancelRun(
 		return { cancelled: true, runId: cancelled };
 	})();
 
-	await emit({ ...event, type: "run.finished", payload: { stage: TASKS.cancel, state: "done", ...result } });
+	emit({ ...event, type: "run.finished", payload: { stage: TASKS.cancel, state: "done", ...result } });
 	return result;
 }
 

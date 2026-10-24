@@ -2,7 +2,6 @@ import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { config, type TaskName } from "../app/config/index.js";
 import { TriageInput } from "../app/schemas/tasks.js";
-import type { FactoryEvent } from "../app/events/index.js";
 import { createGateway, type GatewayDeps } from "../app/gateway/index.js";
 
 const SECRET = "webhook-secret";
@@ -30,38 +29,28 @@ function webhook(body: string, { event = "issues", delivery = "delivery-1" as st
 }
 
 let startTask: Mock<GatewayDeps["startTask"]>;
-let emit: Mock<(event: FactoryEvent) => Promise<void>>;
 let app: ReturnType<typeof createGateway>;
 
 beforeEach(() => {
 	startTask = vi.fn(async (_task: TaskName, _input: object, _key: string) => ({ id: "trn-123" }));
-	emit = vi.fn(async (_event: FactoryEvent) => {});
-	app = createGateway({ startTask, emit, webhookSecret: SECRET });
+	app = createGateway({ startTask, webhookSecret: SECRET });
 });
 
-const deliveryEvent = () => {
-	expect(emit).toHaveBeenCalledTimes(1);
-	const event = emit.mock.calls[0]?.[0] as FactoryEvent;
-	expect(event.type).toBe("delivery.received");
-	return event;
-};
-
 describe("gateway", () => {
-	it("serves /health and /ready without the database", async () => {
+	it("serves /health and /ready", async () => {
 		expect((await app.request("/health")).status).toBe(200);
 		const ready = await app.request("/ready");
 		expect(ready.status).toBe(200);
 		expect(await ready.json()).toEqual({ status: "ready" });
 	});
 
-	it("rejects a bad signature before parsing the body, without an event", async () => {
+	it("rejects a bad signature before parsing the body", async () => {
 		const parse = vi.spyOn(JSON, "parse");
 		const res = await app.fetch(webhook("{not json", { signature: sign("{not json", "wrong") }));
 		expect(res.status).toBe(401);
 		expect(parse).not.toHaveBeenCalled();
 		parse.mockRestore();
 		expect(startTask).not.toHaveBeenCalled();
-		expect(emit).not.toHaveBeenCalled();
 	});
 
 	it("rejects webhook bodies over 256 KB before starting work", async () => {
@@ -80,23 +69,18 @@ describe("gateway", () => {
 		expect(task).toBe("triage");
 		expect(key).toBe("delivery-1");
 		expect(TriageInput.safeParse(input).success).toBe(true);
-
-		const event = deliveryEvent();
-		expect(event).toMatchObject({ traceId: "trn-123", runId: "trn-123", repo: REPO, subject: "issue#12" });
-		expect(event.payload).toMatchObject({
-			event: "issues",
-			action: "labeled",
-			outcome: "started",
-			deliveryId: "delivery-1",
-		});
 	});
 
-	it("returns 502 when startTask fails so GitHub records a failed delivery", async () => {
+	it("returns 502 and logs why when startTask fails, so GitHub records a failed delivery", async () => {
+		const warn = vi.spyOn(console, "error").mockImplementation(() => {});
 		startTask.mockRejectedValueOnce(new Error("render down"));
 		const res = await app.fetch(webhook(JSON.stringify(triagePayload)));
 		expect(res.status).toBe(502);
-		const event = deliveryEvent();
-		expect(event.traceId).toBe("delivery-1");
-		expect(event.payload).toMatchObject({ outcome: "start failed", reason: "render down" });
+		expect(JSON.parse(warn.mock.calls[0]?.[0] as string)).toMatchObject({
+			msg: "could not start task",
+			deliveryId: "delivery-1",
+			error: "render down",
+		});
+		warn.mockRestore();
 	});
 });

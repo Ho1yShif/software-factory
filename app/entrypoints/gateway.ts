@@ -1,7 +1,6 @@
 import { serve } from "@hono/node-server";
 import { Render } from "@renderinc/sdk";
 import { requireEnv } from "../config/index.js";
-import { closeEvents } from "../events/index.js";
 import { createGateway } from "../gateway/index.js";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -23,8 +22,6 @@ console.log(`gateway listening on 0.0.0.0:${port}`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.once(signal, () => {
-		server.close(() => {
-			void closeEvents().finally(() => process.exit(0));
-		});
+		server.close(() => process.exit(0));
 	});
 }
