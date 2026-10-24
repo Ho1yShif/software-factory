@@ -91,6 +91,20 @@ describe("cancel task", () => {
 		expect(events[1]).toMatchObject({ traceId: "trn-cancel", runId: "trn-cancel", repo: REPO });
 	});
 
+	it("clears a status left running by a run that already stopped, and terminates its leftover sandbox", async () => {
+		const { gh, comments, labels, add } = fakeGitHub("write");
+		const marker = renderMarker("status", { runId: "trn-dead", stage: "triage", title: "Triage", state: "running", sandboxId: "sbx-dead" });
+		add(BOT, `running\n\n${marker}`);
+		const runs = fakeRuns({});
+		const result = await cancelRun(ctx, { repo: REPO, installationId: 5, number: 12, kind: "issue", actor: "alice" }, { gh, runs });
+		expect(result).toEqual({ cancelled: false, runId: "trn-dead", reason: "already_stopped" });
+		expect(runs.cancelTaskRun).not.toHaveBeenCalled();
+		expect(runs.terminateSandbox).toHaveBeenCalledWith("sbx-dead");
+		expect(comments).toHaveLength(1);
+		expect(comments[0]?.body).toContain("**Triage** was cancelled: cleared by @alice; the run had already stopped without finishing.");
+		expect(labels.has(WORKING_LABEL)).toBe(false);
+	});
+
 	it("refuses an actor without permission and leaves the run alone", async () => {
 		const { gh, comments, add } = fakeGitHub("read");
 		add(BOT, renderMarker("status", { runId: "trn-1", stage: "triage", state: "running" }));

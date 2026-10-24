@@ -26,7 +26,7 @@ The agent will:
 3. guide creation and installation of a GitHub App;
 4. guide deployment of the Render Blueprint;
 5. connect the webhook and create labels;
-6. verify both deployed services with `doctor`; and
+6. verify both services with `doctor`; and
 7. run one approved Triage smoke test.
 
 The agent must stop for your confirmation before:
@@ -52,7 +52,7 @@ Configure <owner/repository> using base branch <branch>.
 Stop at every human checkpoint and do not expose secrets.
 ```
 
-Setup is complete only when both deployed `doctor` checks pass and applying
+Setup is complete only when `doctor` passes for both services and applying
 `factory:triage` produces an App-authored status comment.
 
 ## Continue

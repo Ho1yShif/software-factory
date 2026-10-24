@@ -61,7 +61,9 @@ After adding a repository:
 1. commit and deploy `factory.config.ts`;
 2. install the GitHub App on the repository;
 3. run `npm run setup:github`; and
-4. apply a factory label or push to the base branch to build its first snapshot.
+4. apply a factory label, push to the base branch, or
+   [refresh its snapshot by hand](operations.md#refresh-a-snapshot-by-hand)
+   to build its first snapshot.
 
 ## Behavior and limits
 

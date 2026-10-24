@@ -8,8 +8,8 @@ This file applies to the whole repository. Read
 
 - **Set up or deploy the factory:** follow
   [docs/runbooks/setup.md](docs/runbooks/setup.md) in order. Do not skip its
-  human checkpoints or claim completion before both deployed `doctor` checks
-  and the Triage smoke test pass.
+  human checkpoints or claim completion before `doctor` passes for both
+  services and the Triage smoke test passes.
 - **Change repositories, labels, models, or limits:** use
   [docs/configuration.md](docs/configuration.md).
 - **Diagnose a live deployment:** use
@@ -60,7 +60,7 @@ agents → sandbox, runner, events, schemas, config
 changeset → sandbox, github, config
 sandbox → runner (to bundle it), github (read tokens), config
 format → schemas, config
-gateway → schemas, events, config
+gateway → schemas, config
 github → config
 runner, events, schemas, config → nothing in app/
 ```
@@ -77,6 +77,7 @@ Import another module through its `index.ts` barrel where one exists. A barrel e
 - Strict TypeScript, ESM, NodeNext. Relative imports end in `.js`. No path aliases.
 - Biome is configured for tabs and a line width of 150 (`biome.json`); CI runs `biome lint`, which must pass with no warnings.
 - Validate every external or cross-process input with Zod at the boundary: webhook payloads, task inputs, agent output, markers, sandbox output, environment.
+- Build every agent output object with `z.strictObject`, so a misspelled field is rejected by name in the error the model sees. `tests/agents-catalog.test.ts` enforces it.
 - Task inputs and results stay small and JSON-serializable. Each task opens
   one sandbox with `withSandbox`, which closes it within the same task.
 - Throw `ExpectedFailure` for an expected failure whose message is safe to show on GitHub. `withClaim` also treats an agent
@@ -115,7 +116,7 @@ each is enforced):
 9. Spec-to-PR implements the spec as it stood when the approval label was applied.
 10. Every sandbox is created with a timeout and closed by `withSandbox` (in `finally`). A claiming task records its sandbox in the status comment, so the run or `/factory cancel` that stops it can terminate the sandbox: Render kills a cancelled task without running `finally`.
 
-`tests/agents-catalog.test.ts` protects unique agent identities and tool authority. Change it only on purpose.
+`tests/agents-catalog.test.ts` protects unique agent identities, tool authority, and strict output schemas. Change it only on purpose.
 
 ## Common changes
 

@@ -96,7 +96,8 @@ The definition fixes:
 - a prompt relative to `app/agents/`;
 - a configured model tier;
 - tools selected from `read`, `ls`, `bash`, `edit`, and `write`;
-- a bounded Zod output schema;
+- a bounded Zod output schema, built from `z.strictObject` so unknown fields
+  are rejected by name;
 - a maximum number of model calls; and
 - an optional thinking level.
 

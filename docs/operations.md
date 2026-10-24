@@ -35,7 +35,9 @@ To cancel, post this as the first line of an issue or pull request comment:
 
 The commenter must have `minimumPermission`. Cancellation stops the run the
 status comment names and terminates its Sandbox. Render kills a cancelled run
-within about a second.
+within about a second. If the comment still says "running" for a run that
+already stopped, for example one Render killed for exceeding its timeout,
+`/factory cancel` marks it cancelled and removes `factory:working`.
 
 To restart a task, remove its trigger label and apply it again.
 
@@ -49,14 +51,19 @@ npm run doctor
 ```
 
 It does not inspect environment variables stored only on Render. To verify
-each deployed service's actual environment, run `doctor` from its Render
-Shell:
+the gateway's actual environment, run `doctor` from its Render Shell:
 
 ```bash
-# factory-gateway
 npm run doctor -- --service gateway
+```
 
-# factory-workflows
+A Workflows service has no Shell, because Render starts a short-lived
+instance for each task run. Check it locally instead, with its values and its
+deployed `RENDER_WORKFLOW_SLUG` in `.env`, as the
+[setup runbook](runbooks/setup.md#phase-9-verify-the-deployed-services)
+describes:
+
+```bash
 npm run doctor -- --service workflows
 ```
 
@@ -81,25 +88,59 @@ Configuration and code changes take effect at different times:
 
 Snapshot refresh keeps the previous usable version when a new build fails.
 
+### Refresh a snapshot by hand
+
+Start the `refresh-snapshot` task with the repository, its App installation,
+and the base branch's head commit:
+
+```bash
+git ls-remote https://github.com/<owner>/<name>.git refs/heads/<base branch>
+echo '[{"repo": "<owner>/<name>", "installationId": <id>, "sha": "<commit>"}]' > input.json
+render workflows tasks runs start <workflow slug>/refresh-snapshot --input-file input.json
+```
+
+The installation ID is the number at the end of the App installation's
+settings URL (`https://github.com/settings/installations/<id>`, or the
+organization's equivalent).
+
 ## Troubleshoot
 
 ### No status comment
 
-Inspect the GitHub App's recent webhook deliveries. Confirm:
+Open the GitHub App's **Advanced** settings and find the delivery under
+**Recent Deliveries**. If there is none, confirm the webhook is active and its
+URL ends in `/webhooks/github`.
 
-- the webhook is active;
-- its URL ends in `/webhooks/github`;
-- the repository appears in `factory.config.ts`; and
-- the triggering actor has `minimumPermission`.
+The gateway's response says what happened. `202` means a task started; look
+for it under `factory-workflows`. A `200` with `{"ignored": "<reason>"}` names
+why nothing started:
+
+- `unconfigured repo`: the repository isn't in `factory.config.ts`.
+- `unhandled label`: the label doesn't match a configured trigger label.
+- `issue not in triage`: a comment arrived on an issue without the Triage
+  label.
+- `bot sender`: bots, including the factory itself, can't start runs.
+- `pull request not open` or `not base branch`: the event targets something
+  the factory skips.
+
+If a task started but the status comment says the run "did not run", the
+triggering actor lacks `minimumPermission`.
 
 ### Webhook delivery returns 401
 
 `GITHUB_WEBHOOK_SECRET` differs between GitHub and `factory-gateway`.
 
+### Webhook delivery returns 422
+
+The delivery was authenticated but produced an invalid task input. The
+gateway logs `authenticated delivery produced an invalid task input` with the
+reason; this usually points to a routing bug.
+
 ### Webhook delivery returns 502
 
-The gateway could not start the task. Check `RENDER_API_KEY`,
-`RENDER_WORKFLOW_SLUG`, and the Workflows service.
+The gateway could not start the task. Its logs show `could not start task`
+with the underlying error. Check `RENDER_API_KEY`, `RENDER_WORKFLOW_SLUG`, and
+the Workflows service.
 
 ### Snapshot build fails
 
@@ -109,6 +150,26 @@ Inspect the `refresh-snapshot` run or the first task run. Common causes are:
 - installation changing tracked files;
 - a missing App installation; or
 - a Sandbox verification failure.
+
+### Agent submitted an invalid result
+
+The status comment says an agent "submitted an invalid result" when it was
+rejected three times for not matching its output schema. The `agent.finished`
+log line records why, with the last attempt's schema problems and the field
+names it sent:
+
+```bash
+render logs -r <factory-workflows id> --text invalid_submission
+```
+
+A misspelled or extra field appears among the submitted names. Problems that
+recur for one issue usually point to the agent's prompt.
+
+### Status comment stuck on "running"
+
+The run stopped without finishing, for example after hitting its timeout.
+Post `/factory cancel` to clear the status and terminate any Sandbox it left,
+or reapply the trigger label to start a fresh run.
 
 ### Agent cannot start
 

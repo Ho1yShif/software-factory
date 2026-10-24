@@ -171,7 +171,9 @@ Changes must preserve these properties:
 6. Publish only after GitHub reproduces the validated tree SHA.
 7. End automation at a draft PR and COMMENT review.
 8. Implement the exact specification that was approved.
-9. Put a timeout and `finally` cleanup around every Sandbox.
+9. Put a timeout and `finally` cleanup around every Sandbox, and record a
+   claiming task's Sandbox in its status comment so whatever stops the run
+   can terminate it.
 
 Tests pin these invariants and each built-in agent's tool authority.
 
@@ -186,6 +188,11 @@ Tests pin these invariants and each built-in agent's tool authority.
 - The claim relies on reading the status comment back right after writing it.
   Two triggers within a second of each other can both do work before one stops.
 - Workflows inputs and results are visible to users with access to the service.
+- Telemetry log lines include repository names, issue subjects, and error
+  messages that can quote repository output, visible to anyone with access to
+  the service logs or a log stream.
+- A cancelled snapshot build leaves its builder Sandbox running until its
+  one-hour timeout, because builder Sandboxes aren't recorded anywhere.
 
 Use a dedicated Render workspace and spend-capped model key when stronger
 isolation is required.
@@ -196,11 +203,12 @@ Start with these files:
 
 1. [`app/gateway/routes.ts`](../app/gateway/routes.ts) — event routing.
 2. [`app/claims/claim.ts`](../app/claims/claim.ts) — the claim lifecycle every claiming task shares.
-3. [`app/workflows/triage/index.ts`](../app/workflows/triage/index.ts) — one complete claiming task.
-4. [`app/agents/run.ts`](../app/agents/run.ts) — Sandbox agent execution.
-5. [`app/sandbox/sandbox.ts`](../app/sandbox/sandbox.ts) — Sandbox lifecycle.
-6. [`app/workflows/spec-to-pr/index.ts`](../app/workflows/spec-to-pr/index.ts) — implementation and verification.
-7. [`app/changeset/index.ts`](../app/changeset/index.ts) — validated publishing.
+3. [`app/workflows/claiming-task.ts`](../app/workflows/claiming-task.ts) — how a claiming task is declared.
+4. [`app/workflows/triage/index.ts`](../app/workflows/triage/index.ts) — one complete claiming task.
+5. [`app/agents/run.ts`](../app/agents/run.ts) — Sandbox agent execution.
+6. [`app/sandbox/sandbox.ts`](../app/sandbox/sandbox.ts) — Sandbox lifecycle.
+7. [`app/workflows/spec-to-pr/index.ts`](../app/workflows/spec-to-pr/index.ts) — implementation and verification.
+8. [`app/changeset/index.ts`](../app/changeset/index.ts) — validated publishing.
 
 See [Contributing](../CONTRIBUTING.md) for local development and extension
 recipes.

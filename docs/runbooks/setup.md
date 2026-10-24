@@ -1,8 +1,8 @@
 # Setup runbook
 
 Use this runbook when helping someone deploy Software Factory for the first
-time. Follow it in order. Do not claim setup is complete until both deployed
-services pass `doctor` and a labeled issue produces a factory status comment.
+time. Follow it in order. Do not claim setup is complete until `doctor`
+passes for both services and a labeled issue produces a factory status comment.
 
 ## Goal
 
@@ -17,7 +17,8 @@ Setup is complete only when:
 - the GitHub App is installed on every configured repository;
 - the App webhook is active and points to the gateway;
 - the factory labels exist;
-- deployed `doctor` checks pass for the gateway and Workflows services; and
+- `doctor` passes for the gateway (in its Render Shell) and for the Workflows
+  service (run locally with that service's values); and
 - applying `factory:triage` produces an App-authored status comment.
 
 ## Required inputs
@@ -334,34 +335,55 @@ The user confirms the webhook is active.
 
 ## Phase 9: Verify the deployed services
 
-Run `doctor` inside each service's Render Shell so it reads that service's
-deployed environment.
+`doctor` checks the environment it runs in. It is read-only and does not
+print secret values.
 
-### Human checkpoint or agent action with Render access
+### Human checkpoint or agent action with Render access: the gateway
 
-In `factory-gateway`:
+Run `doctor` in the `factory-gateway` Render Shell, so it reads the deployed
+environment:
 
 ```bash
 npm run doctor -- --service gateway
 ```
 
-In `factory-workflows`:
+### Agent action: the Workflows service
+
+A Workflows service has no Shell: Render starts a short-lived instance for
+each task run. Run `doctor` locally with the values `factory-workflows` holds.
+`.env` already has `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` from Phase 4.
+Ask the user to add these to `.env` without pasting them into chat:
+
+- `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, and `ANTHROPIC_API_KEY`, matching
+  the service; and
+- `RENDER_WORKFLOW_SLUG`, the deployed workflow's slug. Render may add a
+  suffix to the service name (such as `factory-workflows-a1b2`); the
+  gateway's `RENDER_WORKFLOW_SLUG` shows the exact value.
+
+Then run:
 
 ```bash
 npm run doctor -- --service workflows
 ```
 
-`doctor` is read-only and does not print secret values.
+### Expected warning
+
+Until GitHub has delivered a webhook, `doctor` warns "no webhook deliveries
+yet, so the hook may be inactive". This is expected before the smoke test and
+does not block setup. If it persists after Phase 10, recheck Phase 8.
 
 ### Pass condition
 
-Both commands exit successfully with every required check passing.
+Both commands exit successfully with every required check passing. Warnings
+do not block.
 
 ### Recovery
 
 - Gateway failure: check webhook secret, Render API key, and workflow slug.
 - Workflows failure: check Render workspace ID, Render API key, GitHub App
   credentials, provider key, and registered tasks.
+- "No tasks found" for the workflow: `RENDER_WORKFLOW_SLUG` in `.env` doesn't
+  match the deployed slug.
 - App failure: compare required permissions and events with Phase 4.
 - Label or installation failure: rerun `npm run setup:github` after fixing
   App access.
@@ -407,6 +429,8 @@ snapshot.
 - `factory:working` appears while the task is running.
 - Triage ends with questions, a specification, or an intentional decline.
 - The status comment includes the final outcome or a useful failure.
+- Optional: the `factory-workflows` logs contain a `run.finished` JSON line
+  for the run (`render logs -r <factory-workflows id> --text run.finished`).
 
 If the status comment never appears, use
 [Operations](../operations.md#no-status-comment).
