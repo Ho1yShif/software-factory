@@ -1,9 +1,13 @@
 # Configuration
 
-[`factory.config.ts`](../factory.config.ts) is the factory's committed
-application configuration. Both deployed services import it.
+[`factory.config.ts`](../factory.config.ts) is committed application
+configuration. The gateway and Workflows service both import it.
 
-## Complete example
+Edit it before the first deployment and whenever you change repositories,
+labels, model assignments, permissions, publishing limits, or Sandbox
+lifetimes.
+
+## Example
 
 ```typescript
 export default defineFactoryConfig({
@@ -43,75 +47,191 @@ export default defineFactoryConfig({
 
 ## Repositories
 
-`repos` is keyed by exact `owner/name`. Webhooks from any other repository
-are ignored, even when the App is installed there.
+`repos` is keyed by exact GitHub `owner/name`. The factory ignores webhooks
+from any other repository, even if the App is installed there.
 
-| Field | Required | Purpose |
+| Field | Required | Meaning |
 |---|---|---|
 | `baseBranch` | Yes | Branch used for Triage, implementation, and snapshots |
-| `install` | No | Dependency command run after repository credentials are removed |
-| `verify` | Yes | Commands required before publishing and run during PR review |
+| `install` | No | Dependency command run after clone credentials are removed |
+| `verify` | Yes | Commands required before publishing and during PR review |
 
 Use deterministic install commands such as `npm ci`. Snapshot creation fails
-if installation changes a tracked file. An empty `verify` list explicitly
-disables command-based verification.
+if installation changes a tracked file. Use `verify: []` only when you
+intentionally want no command-based verification.
 
 After adding a repository:
 
-1. commit and deploy `factory.config.ts`;
+1. commit and deploy the configuration;
 2. install the GitHub App on the repository;
 3. run `npm run setup:github`; and
-4. apply a factory label, push to the base branch, or
-   [refresh its snapshot by hand](operations.md#refresh-a-snapshot-by-hand)
-   to build its first snapshot.
+4. push to the base branch, start a factory task, or
+   [refresh the snapshot directly](#refresh-a-snapshot).
 
-## Behavior and limits
+## Labels, permission, and limits
 
-| Setting | Default | Purpose |
+| Setting | Default | Meaning |
 |---|---|---|
 | `labels.triage` | `factory:triage` | Starts or continues Triage |
 | `labels.specApproved` | `factory:spec-approved` | Starts Spec-to-PR |
 | `labels.prReview` | `factory:pr-review` | Starts PR Reviewer |
 | `commandPrefix` | `/factory` | Prefix for commands such as `/factory cancel` |
-| `minimumPermission` | `write` | Required live GitHub permission |
+| `minimumPermission` | `write` | Live repository permission required to start work |
 | `models.medium` | `anthropic/claude-sonnet-5` | Triage and PR Reviewer model |
 | `models.large` | `anthropic/claude-opus-5` | Spec writer and implementer model |
 | `limits.repairRounds` | `2` | Repair attempts after failed verification |
 | `limits.maxChangedFiles` | `200` | Maximum files in a published change |
 | `limits.maxFileBytes` | `1000000` | Maximum size of one changed file |
-| `sandbox.timeoutSeconds` | `14400` | Provider-side Sandbox lifetime |
+| `sandbox.timeoutSeconds` | `14400` | Provider-side Sandbox lifetime in seconds |
 
-`setup:github` also creates `factory:working`, which marks an active run. It
-is operational state rather than a configurable trigger label.
+`minimumPermission` accepts `triage`, `write`, `maintain`, or `admin`. The
+factory checks the triggering actor's current permission at the start of
+every claiming task.
 
-After renaming a label, deploy both services and rerun
-`npm run setup:github`. Existing labels are not removed automatically.
+`setup:gibthub` also creates `factory:working`. This label records an active
+run; it is not a trigger.
 
-Keep the Sandbox timeout at least as long as the longest Workflows task.
+If you rename a trigger label, deploy both services and rerun
+`npm run setup:github`. The command creates required labels but does not
+remove old ones.
+
+Keep `sandbox.timeoutSeconds` at least as long as the longest Workflows task.
 
 ## Models
 
-Each agent selects `medium` or `large`; configuration maps the tier to a
-`provider/model` in Pi's model registry.
+Agent definitions select the `medium` or `large` tier.
+`factory.config.ts` maps each tier to a `provider/model` supported by
+`@earendil-works/pi-ai`, the model client used by the Sandbox runner.
 
-To change Anthropic models, update the mappings and redeploy the Workflows
-service. To use another supported provider:
+Changing a model mapping requires a Workflows redeploy. To add another
+provider:
 
-1. choose its registered `provider/model`;
-2. find its key variable in [`app/runner/keys.ts`](../app/runner/keys.ts);
-3. add the variable to the Workflows service in [`render.yaml`](../render.yaml);
-4. add it to [`.env.example`](../.env.example) and setup requirements;
+1. choose a registered `provider/model`;
+2. find its key name in [`app/runner/keys.ts`](../app/runner/keys.ts);
+3. add the key to `factory-workflows` in [`render.yaml`](../render.yaml);
+4. add it to [`.env.example`](../.env.example) and
+   `SERVICE_ENV` in `scripts/lib/requirements.ts`;
 5. set the key in Render; and
 6. run `npm run doctor -- --service workflows`.
 
-Use a key dedicated to this factory with a provider-enforced spend limit.
-Turn limits and timeouts bound execution, but the factory has no hard dollar
-budget.
+Use a key dedicated to this deployment with a provider-enforced spend limit.
+The factory has no hard dollar budget.
+
+## What must be redeployed
+
+| Change | Required action |
+|---|---|
+| Repository, label, permission, or publishing limit | Deploy both services |
+| Model mapping | Deploy `factory-workflows` |
+| Prompt or Workflows service code | Deploy `factory-workflows` |
+| Gateway routing or validation | Deploy `factory-gateway` |
+| Label, App permission, or subscribed event | Run `npm run setup:github`; update the App when prompted |
+| `app/runner/` or `sandbox/` | Deploy Workflows, then refresh each repository snapshot |
+| Repository `install` command or lockfiles | Refresh the snapshot, or let the next task reinstall |
+
+## Snapshots
+
+Each configured repository has a dependency-installed Sandbox snapshot. A
+push to its base branch refreshes it. If no snapshot exists, the first task
+builds one.
+
+A failed refresh does not delete the previous usable snapshot.
+
+### Refresh a snapshot
+
+Start the `refresh-snapshot` task with the repository, its GitHub App
+installation ID, and the base branch's current commit:
+
+```bash
+git ls-remote https://github.com/<owner>/<name>.git refs/heads/<base-branch>
+
+cat > input.json <<'JSON'
+[{"repo":"<owner>/<name>","installationId":<id>,"sha":"<commit>"}]
+JSON
+
+render workflows tasks runs start \
+  <workflow-slug>/refresh-snapshot \
+  --input-file input.json
+```
+
+The installation ID is the number at the end of the installation settings
+URL:
+
+```text
+https://github.com/settings/installations/<id>
+```
+
+Organization installations use the equivalent organization settings URL.
+
+## Follow and control runs
+
+While a claiming task runs, the issue or pull request has `factory:working`.
+The App-authored status comment shows progress, the run ID, and the final
+result. Its hidden marker records the current Sandbox for cancellation.
+
+Open that run under `factory-workflows` in the Render Dashboard to inspect its
+input, logs, and result.
+
+The service also writes structured events:
+
+- `run.finished` records the task, state, outcome, and duration.
+- `agent.finished` records the agent, model, turns, token usage, reported
+  cost, and stop reason.
+
+Search them with the Render CLI:
+
+```bash
+render logs -r <factory-workflows-id> --text run.finished
+render logs -r <factory-workflows-id> --text agent.finished
+```
+
+To cancel a run, post this as the first line of an issue or pull request
+comment:
+
+```text
+/factory cancel
+```
+
+The commenter needs `minimumPermission`. Cancellation stops the run named in
+the status comment and terminates its recorded Sandbox. It also clears a stale
+`running` status when the task has already stopped.
+
+To restart work, remove the trigger label and apply it again.
+
+## Check a deployment
+
+`doctor` is read-only, does not print secret values, and exits nonzero when a
+required check fails.
+
+From a local checkout, this checks the services and credentials represented
+by local `.env`:
+
+```bash
+npm run doctor
+```
+
+It cannot inspect values stored only in Render. Check the deployed gateway
+from its Render Shell:
+
+```bash
+npm run doctor -- --service gateway
+```
+
+Workflows services have no Shell. Put the deployed Workflows values and exact
+`RENDER_WORKFLOW_SLUG` in local `.env`, then run:
+
+```bash
+npm run doctor -- --service workflows
+```
+
+The [setup runbook](runbooks/setup.md#phase-9-run-doctor) lists the required
+values and common failures.
 
 ## Environment variables
 
-Every local variable appears in [`.env.example`](../.env.example). The
-Blueprint wires the gateway's reference to the Workflows service.
+Local variables are listed in [`.env.example`](../.env.example). The
+Blueprint supplies `RENDER_WORKFLOW_SLUG` to the gateway from the Workflows
+service.
 
 ### Gateway
 
@@ -133,9 +253,8 @@ Blueprint wires the gateway's reference to the Workflows service.
 | `ANTHROPIC_API_KEY` | Call the default models |
 | `GITHUB_API_URL` | Optional GitHub API base URL |
 
-`GITHUB_API_URL` is not declared by the Blueprint. GitHub Enterprise Server
-users must set it in local `.env` for setup commands and manually on
-`factory-workflows` in the Render Dashboard.
+`GITHUB_API_URL` is not in the Blueprint. GitHub Enterprise Server users must
+set it in local `.env` for setup commands and on `factory-workflows` in the
+Render Dashboard.
 
-The gateway must bind to `0.0.0.0:$PORT` when deployed. Never commit `.env`
-or provider keys.
+Never commit `.env` or provider keys.

@@ -1,8 +1,8 @@
 # Architecture
 
-software-factory separates model-directed work from authority. Agents inspect
-and modify code inside short-lived Render Sandboxes; trusted Workflows code
-decides what may be written to GitHub.
+Agents inspect and modify repositories inside short-lived Render Sandboxes.
+Code in the Workflows service validates their results and performs every
+GitHub write.
 
 ## System
 
@@ -10,205 +10,230 @@ decides what may be written to GitHub.
 flowchart LR
   GitHub -->|signed webhook| Gateway
   Gateway -->|start task| Workflows
-  Workflows -->|restore and execute| Sandbox
-  Sandbox -->|proposed result| Workflows
-  Workflows -->|validated writes| GitHub
+  Workflows -->|restore| Sandbox
+  Sandbox -->|typed result or candidate tree| Workflows
+  Workflows -->|validated write| GitHub
   Workflows -->|build| Snapshot
   Snapshot -.->|restore| Sandbox
 ```
 
-The Blueprint creates two services in a `software-factory` project:
+The Blueprint deploys two services:
 
-- **Gateway** verifies GitHub webhooks and maps each delivery to one task.
-- **Workflows** runs the claiming tasks, agents, cancellation, snapshot refresh, and
-  GitHub publishing.
+- **Gateway** verifies webhooks and maps each delivery to one task.
+- **Workflows** runs tasks, manages Sandboxes, and writes to GitHub.
 
-Each claiming task receives a fresh Sandbox restored from a repository snapshot.
-Render Workflows owns task state and timeouts. GitHub owns the human
-conversation and artifacts. The application has no custom queue, dispatcher,
-heartbeat loop, or maintenance cron.
+The application does not implement its own queue, dispatcher, heartbeat
+process, maintenance loop, or database.
 
-## Human-gated flow
+## Workflow
 
 ```text
 issue --factory:triage--> specification
-specification --factory:spec-approved--> verified draft PR
+specification --factory:spec-approved--> draft pull request
 pull request --factory:pr-review--> COMMENT review
 ```
 
-The tasks never chain automatically. The factory cannot approve, request
-changes, mark ready, or merge.
-
 ### Triage
 
-Triage reads the issue discussion and base branch, then asks up to five
-questions, writes a bounded specification, or declines. Questions and specs
-are GitHub comments with hidden structured markers.
+Triage reads the issue discussion and the base branch. The triage agent asks
+up to five questions, declines the request, or sends it to the spec-writing
+agent. The spec-writing agent produces a bounded specification. Questions and
+specifications are GitHub comments with hidden markers.
 
 ### Spec-to-PR
 
-Spec-to-PR verifies that the specification has not changed since approval,
-implements it in a Sandbox, runs configured checks, permits bounded repair
-attempts, and opens a draft pull request on
-`factory/issue-<number>`.
+Spec-to-PR confirms that the approved specification has not changed. It
+implements that specification in a Sandbox, runs the configured verification
+commands, allows a bounded number of repairs, and opens a draft pull request
+on `factory/issue-<number>`.
 
 ### PR Reviewer
 
-PR Reviewer checks out the labeled head commit, runs configured verification,
-and posts one COMMENT review covering security, correctness, performance, and
-tests.
+PR Reviewer checks out the labeled pull request commit, runs the configured
+verification commands, and posts one COMMENT review. The review covers
+security, correctness, performance, and tests.
 
-## State ownership
+## State
+
+Each system owns the state it already manages:
 
 | State | Owner |
 |---|---|
 | Task status, timing, input, and result | Render Workflows |
-| Issues, labels, specifications, PRs, and reviews | GitHub |
-| Current run for an issue or PR, and its Sandbox | App-authored status comment marker |
-| User-visible run status | The same status comment, and the working label |
+| Issues, labels, specifications, pull requests, and reviews | GitHub |
+| Current run and Sandbox for an issue or pull request | App-authored status comment |
 | Prepared repository filesystem | Render Sandbox snapshot |
-| Run and agent outcomes, usage, and cost | JSON lines in the service logs |
+| Run and agent outcomes, usage, and cost | JSON lines in Workflows logs |
 
-Telemetry is write-only: nothing reads it back to decide what a task does.
+Telemetry is not application state. Nothing reads log events to decide what a
+task may do.
 
-## Idempotency and competing runs
+## Coordination
 
-The system handles retries and overlap at three levels:
+Webhook delivery is not exactly once. GitHub can redeliver events, and people
+can apply labels or post comments at the same time. The factory handles this
+at three boundaries:
 
-1. GitHub's delivery ID is the Workflows idempotency key.
-2. The status comment is the claim: a claiming task works only while the
-   comment names its run.
-3. App-authored markers let writes update or reuse existing artifacts.
+1. The GitHub delivery ID becomes the Workflows idempotency key.
+2. The status comment names the run that holds the claim on an issue or pull
+   request.
+3. Hidden markers identify App-authored specifications, pull requests, and
+   reviews so writes can update or reuse them.
 
-A new trigger takes over by cancelling the run the status comment names,
-terminating that run's Sandbox, and rewriting the comment to name itself.
-Render kills a cancelled task run's process within about a second, so a
-replaced run can't keep writing. Two triggers that arrive together both take
-over; the run whose status write lands last keeps the claim, and the other
-stops at its next checkpoint. Every claiming task checks the claim before
-progress updates and durable writes. Publishing also uses a deterministic
-branch and refuses to overwrite human commits.
+A new claiming run cancels the run named in the status comment, terminates
+its recorded Sandbox, and writes its own run ID to the comment. The run whose
+write remains visible holds the claim. Other runs stop when they next check
+the comment.
 
-## Sandbox lifecycle
+Claiming tasks check ownership before progress updates and durable writes.
+Publishing also uses a deterministic branch and refuses to overwrite human
+commits.
 
-A base-branch push builds a repository snapshot containing runtime tools, a
-base checkout, and installed dependencies. Every claiming task:
+This design keeps coordination beside the GitHub object it controls. Adding a
+database would create a second owner for the same claim.
+
+## Sandboxes and snapshots
+
+A base-branch push builds a repository snapshot with the runner, a base
+checkout, and installed dependencies. A claiming task then:
 
 1. restores the newest snapshot;
-2. verifies its permissions and process hardening;
+2. verifies runtime permissions and process hardening;
 3. fetches the exact requested ref with a temporary read-only token;
-4. removes and verifies removal of that token;
-5. reinstalls dependencies if lockfiles or the install command changed;
+4. removes the token and verifies its removal;
+5. reinstalls dependencies when the lockfiles or install command changed;
 6. runs agents and repository commands as an unprivileged user; and
 7. closes the Sandbox in `finally`.
 
-A cancelled task run is killed without reaching `finally`, so each claiming
-task records its Sandbox in the status comment, and the run or `/factory cancel`
-that stops it terminates the Sandbox. The provider-side timeout is the backstop
-for anything else that dies before cleanup.
+Render terminates a cancelled task without running `finally`. For that case,
+each claiming task records its Sandbox ID in the status comment. A replacement
+run or `/factory cancel` terminates the recorded Sandbox. The provider timeout
+is the final cleanup backstop.
 
-## Agent contract
+Snapshots avoid reinstalling dependencies on every run. Restored Sandboxes
+still fetch the requested commit and verify their current state; a snapshot is
+prepared state, not trusted current state.
 
-An agent definition fixes its prompt, model tier, tools, output schema, turn
-limit, and optional thinking level. The complete model loop and every
-model-directed tool run inside the Sandbox.
+## Agents
 
-Agents finish through a typed `submit` tool. The Sandbox validates the
-submission against JSON Schema, and the host validates it again with the
-authoritative Zod schema. Repositories, refs, issue numbers, pull requests,
-and write destinations come from authenticated task input—not model output.
+An agent definition fixes:
 
-## Publishing boundary
+- its prompt;
+- model tier and thinking level;
+- available tools;
+- output schema;
+- turn limit; and
+- stable ID.
 
-The Sandbox has no GitHub write credential. It produces a candidate tree,
-which trusted Workflows code validates before publishing:
+The model loop and every model-directed tool run in the Sandbox beside the
+checkout. Agent tools never run on the Workflows host.
 
-1. collect changes through a throwaway Git directory;
-2. validate paths, modes, file counts, sizes, and blob hashes;
-3. reject workflow files, symlinks, and submodules;
-4. ask GitHub to build the same tree independently;
-5. require GitHub's tree SHA to match the Sandbox tree SHA; and
-6. move the deterministic branch only when ownership is safe.
+Every agent finishes through a typed `submit` tool. The runner validates the
+submission against JSON Schema. The host validates it again with the agent's
+Zod schema. Repositories, refs, issue numbers, pull requests, branches, and
+write targets come from authenticated task input, never model output.
 
-This makes the model a source of proposed bytes, not authority over GitHub.
+## Publishing
+
+The Sandbox has no GitHub write credential. It returns a candidate tree to
+the Workflows host, which:
+
+1. collects changes through a throwaway Git directory;
+2. validates paths, modes, file counts, sizes, and blob hashes;
+3. rejects workflow files, symlinks, and submodules;
+4. asks GitHub to build the same tree;
+5. compares GitHub's tree SHA with the Sandbox tree SHA; and
+6. moves the deterministic branch only when the factory still owns it.
 
 ## Trust boundaries
 
-The factory treats issue text, comments, source files, dependency scripts,
-and pull request diffs as untrusted.
+Issue text, comments, source files, dependency scripts, and pull request diffs
+are untrusted.
 
 ### Gateway
 
-The gateway verifies the webhook signature before parsing JSON. It holds no
-GitHub credential and runs no model or repository code.
+The gateway verifies the webhook signature before parsing the body. It holds
+no GitHub credential and runs no model or repository code.
 
 ### Workflows host
 
-The Workflows service holds service credentials. Trusted code selects
-destinations, enforces run ownership, validates Sandbox output, and performs
-GitHub writes. No agent tool runs in this process.
+The Workflows service holds GitHub and Render credentials. It selects every
+destination, checks claim ownership, validates Sandbox output, and performs
+GitHub writes.
 
-### Sandboxes
+### Sandbox
 
-Clone and fetch use temporary read-only credentials that are removed before
-repository code or agents run. Runtime files are root-owned and read-only.
-Agents and repository commands run unprivileged.
+Clone and fetch credentials are read-only and temporary. Runtime files are
+root-owned and read-only. Agents and repository commands run as an
+unprivileged user.
 
-The model key enters the Sandbox for an agent call. It is delivered through a
-root-only path and stdin, removed from the environment before tools run, and
-protected by a non-dumpable runner. These controls reduce exposure but do not
-eliminate it.
+The model key enters the Sandbox during an agent call. The runner receives it
+through a root-only path and stdin, removes provider keys from tool
+environments, and runs under a non-dumpable Node binary. These controls reduce
+exposure; they do not make untrusted code safe.
 
 ## Security invariants
 
 Changes must preserve these properties:
 
-1. Verify webhook signatures before parsing.
-2. Check the triggering actor's live permission for every run.
-3. Keep GitHub write credentials out of Sandboxes.
-4. Run all model-directed tools inside Sandboxes.
-5. Reconstruct repositories, refs, branches, and write targets from trusted input.
-6. Publish only after GitHub reproduces the validated tree SHA.
-7. End automation at a draft PR and COMMENT review.
-8. Implement the exact specification that was approved.
-9. Put a timeout and `finally` cleanup around every Sandbox, and record a
-   claiming task's Sandbox in its status comment so whatever stops the run
-   can terminate it.
+1. Verify a webhook signature before parsing its body.
+2. Check the triggering actor's current repository permission for every
+   claiming run.
+3. Let only code in the Workflows service write to GitHub.
+4. Keep GitHub write credentials out of Sandboxes.
+5. Run every model-directed tool inside a Sandbox.
+6. Build repositories, refs, branches, and write targets from trusted input.
+7. Publish only after GitHub reproduces the validated tree SHA.
+8. Stop automation at a draft pull request and a COMMENT review.
+9. Implement the specification as it existed when approved.
+10. Give every Sandbox a provider timeout and `finally` cleanup. Record a
+    claiming task's Sandbox so cancellation can terminate it.
 
-Tests pin these invariants and each built-in agent's tool authority.
+Tests pin these invariants and the tool authority of every built-in agent.
 
 ## Residual risks
 
-- Sandboxes use allow-all egress, leaving network and DNS exfiltration paths.
+- Sandboxes use allow-all egress.
 - The model key exists in runner memory during a call.
-- Any collaborator with `minimumPermission` can initiate model spend.
-- PR Reviewer executes configured verification against the labeled PR code.
-- Prompt injection can influence specs, code, and reviews.
+- Prompt injection can influence specifications, code, and reviews.
+- Anyone with `minimumPermission` can start model spend.
+- PR Reviewer runs repository-defined commands from the labeled pull request.
 - The Render API key may have workspace-wide authority.
-- The claim relies on reading the status comment back right after writing it.
-  Two triggers within a second of each other can both do work before one stops.
-- Workflows inputs and results are visible to users with access to the service.
-- Telemetry log lines include repository names, issue subjects, and error
-  messages that can quote repository output, visible to anyone with access to
-  the service logs or a log stream.
-- A cancelled snapshot build leaves its builder Sandbox running until its
-  one-hour timeout, because builder Sandboxes aren't recorded anywhere.
+- Near-simultaneous triggers can both work until one loses the status-comment
+  claim.
+- Workflows inputs and results are visible to people with service access.
+- Telemetry can include repository names, issue subjects, and errors that
+  quote repository output.
+- The filesystem of each deployed Render service is ephemeral. Durable state
+  belongs in GitHub, Workflows, or Sandbox snapshots.
+- A cancelled snapshot build can leave its builder Sandbox running until the
+  one-hour provider timeout because builders are not recorded in a status
+  comment.
 
-Use a dedicated Render workspace and spend-capped model key when stronger
-isolation is required.
+Use a dedicated Render workspace and a spend-capped model key when stronger
+isolation matters.
+
+Expected work failures produce a useful status-comment result. Unexpected
+platform or programming failures fail the Workflows task and require
+operator investigation.
 
 ## Code map
 
-Start with these files:
+Start with:
 
-1. [`app/gateway/routes.ts`](../app/gateway/routes.ts) — event routing.
-2. [`app/claims/claim.ts`](../app/claims/claim.ts) — the claim lifecycle every claiming task shares.
-3. [`app/workflows/claiming-task.ts`](../app/workflows/claiming-task.ts) — how a claiming task is declared.
-4. [`app/workflows/triage/index.ts`](../app/workflows/triage/index.ts) — one complete claiming task.
-5. [`app/agents/run.ts`](../app/agents/run.ts) — Sandbox agent execution.
-6. [`app/sandbox/sandbox.ts`](../app/sandbox/sandbox.ts) — Sandbox lifecycle.
-7. [`app/workflows/spec-to-pr/index.ts`](../app/workflows/spec-to-pr/index.ts) — implementation and verification.
-8. [`app/changeset/index.ts`](../app/changeset/index.ts) — validated publishing.
+1. [`app/gateway/routes.ts`](../app/gateway/routes.ts) — webhook-to-task
+   routing.
+2. [`app/workflows/claiming-task.ts`](../app/workflows/claiming-task.ts) —
+   claiming task declaration.
+3. [`app/claims/claim.ts`](../app/claims/claim.ts) — permission, ownership,
+   progress, and completion.
+4. [`app/workflows/triage/index.ts`](../app/workflows/triage/index.ts) — one
+   complete claiming task.
+5. [`app/agents/run.ts`](../app/agents/run.ts) — host-side agent execution.
+6. [`app/runner/main.ts`](../app/runner/main.ts) — Sandbox runner entry point.
+7. [`app/sandbox/sandbox.ts`](../app/sandbox/sandbox.ts) — Sandbox lifecycle.
+8. [`app/changeset/index.ts`](../app/changeset/index.ts) — validated
+   publishing.
 
-See [Contributing](../CONTRIBUTING.md) for local development and extension
-recipes.
+Use the [extension runbook](runbooks/extend.md) to add agents, tasks, or
+triggers.

@@ -1,64 +1,64 @@
 # Quickstart
 
-The fastest path is to ask a coding agent to follow the
-[Setup runbook](runbooks/setup.md). It gives the agent exact commands,
-verification criteria, recovery steps, and explicit checkpoints for actions
-only you should take.
+Use a coding agent for the first deployment. The
+[Setup runbook](runbooks/setup.md) gives it the commands, checks, recovery
+steps, and points where you must take over.
 
-## What you need
+## Before you start
+
+Prepare:
 
 - a fork of this repository;
 - a Render workspace with Sandboxes access in Oregon;
 - a Render API key;
-- a dedicated, spend-capped Anthropic API key;
+- a dedicated Anthropic API key with a provider-enforced spend limit;
 - admin access to each target GitHub repository; and
 - the Node.js version in [`.node-version`](../.node-version).
 
-The Blueprint creates paid Render resources in a `software-factory` project: a
-Starter web service and a Workflows service. Sandbox and model usage are charged separately.
+The Blueprint creates paid resources: a Starter web service and a Workflows
+service. Sandbox and model usage are billed separately.
 
-## What the setup agent will do
+## Start the setup
 
-The agent will:
-
-1. inspect the repository and run its checks;
-2. configure target repositories in `factory.config.ts`;
-3. guide creation and installation of a GitHub App;
-4. guide deployment of the Render Blueprint;
-5. connect the webhook and create labels;
-6. verify both services with `doctor`; and
-7. run one approved Triage smoke test.
-
-The agent must stop for your confirmation before:
-
-- committing or pushing configuration unless already authorized;
-- creating the GitHub App;
-- installing it on repositories;
-- creating paid Render resources;
-- entering secrets;
-- activating the webhook; or
-- creating and labeling a test issue.
-
-Never paste API keys, private keys, or webhook secrets into chat. Enter them
-directly in `.env` or the Render Dashboard.
-
-## Start
-
-Open the fork in your coding agent and ask:
+Open your fork in a coding agent and use this prompt:
 
 ```text
 Set up software-factory by following docs/runbooks/setup.md.
-Configure <owner/repository> using base branch <branch>.
-Stop at every human checkpoint and do not expose secrets.
+Configure <owner/repository> with base branch <branch>.
+Stop at every human checkpoint. Do not print or expose secrets.
 ```
 
-Setup is complete only when `doctor` passes for both services and applying
-`factory:triage` produces an App-authored status comment.
+The agent will configure the fork, create a GitHub App, deploy the Blueprint,
+connect the webhook, verify the deployment, and guide one Triage smoke test.
 
-## Continue
+You must take over for:
 
-- [Setup runbook](runbooks/setup.md): complete agent execution protocol.
-- [Configuration](configuration.md): repositories, models, labels, and limits.
-- [Operations](operations.md): logs, cancellation, snapshots, and troubleshooting.
-- [Architecture](architecture.md): state ownership and trust boundaries.
-- [Contributing](../CONTRIBUTING.md): local development and implementation changes.
+- approval to commit or push;
+- GitHub App creation and installation;
+- paid Render resource creation;
+- secret entry;
+- webhook activation; and
+- creation or labeling of the smoke-test issue.
+
+Enter secrets directly in `.env`, GitHub, or the Render Dashboard. Never put
+them in chat, issues, commits, or command output.
+
+## Definition of done
+
+Setup is complete when:
+
+- `factory-gateway` and `factory-workflows` are live;
+- the GitHub App is installed and its webhook is active;
+- gateway `doctor` passes in its Render Shell and Workflows `doctor` passes
+  locally with the deployed service's values; and
+- applying `factory:triage` produces an App-authored status comment and a
+  useful outcome.
+
+## Next steps
+
+- [Configuration](configuration.md) — change settings, follow or cancel runs,
+  check a deployment, and manage snapshots.
+- [Architecture](architecture.md) — understand state, coordination, and
+  security.
+- [Extension runbook](runbooks/extend.md) — add agents, Workflows tasks, or
+  GitHub triggers.
