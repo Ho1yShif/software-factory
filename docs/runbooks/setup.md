@@ -1,70 +1,54 @@
 # Setup runbook
 
-Use this runbook when helping someone deploy Software Factory for the first
-time. Follow it in order. Do not claim setup is complete until both deployed
-services pass `doctor` and a labeled issue produces a factory status comment.
+Use this runbook to deploy software-factory from a fork and connect its first
+repository. Follow the phases in order. Stop at every **Human checkpoint**.
 
-## Goal
+Setup is complete only after gateway `doctor` passes in its Render Shell,
+Workflows `doctor` passes locally with the deployed values, and a Triage smoke
+test reaches an App-authored status comment.
 
-Deploy Software Factory from the user's fork, connect it to one GitHub
-repository, and complete one Triage run.
+## Inputs
 
-## Success criteria
-
-Setup is complete only when:
-
-- `factory-gateway` and `factory-workflows` are live;
-- the GitHub App is installed on every configured repository;
-- the App webhook is active and points to the gateway;
-- the factory labels exist;
-- deployed `doctor` checks pass for the gateway and Workflows services; and
-- applying `factory:triage` produces an App-authored status comment.
-
-## Required inputs
-
-Collect or infer these before editing:
+Collect:
 
 - fork owner and repository;
 - target repository in `owner/name` form;
 - target base branch;
 - deterministic dependency install command, if needed;
 - verification commands;
-- GitHub App owner: the user or an organization;
+- GitHub App owner: a user or organization;
 - Render workspace with Sandboxes access in Oregon; and
-- whether the default Anthropic models are acceptable.
+- confirmation that the default Anthropic models are acceptable.
 
-The user must provide these secrets directly to local environment files or
-Render—not in chat, issues, commits, or command output:
+The user must enter these secrets directly in local files, GitHub, or Render:
 
 - Render API key;
-- model provider API key; and
-- generated GitHub App private key and webhook secret.
+- Anthropic API key;
+- GitHub App private key; and
+- webhook secret.
 
-## Non-negotiable constraints
+Never ask the user to paste a secret into chat. Never print `.env`.
+
+## Rules
 
 - Deploy from the user's fork, not `render-examples/software-factory`.
-- Use the Node.js version pinned in `.node-version`.
-- Never commit `.env` or print secret values.
-- Do not weaken GitHub App permissions or security invariants to make setup
-  pass.
-- Do not change existing GitHub App permissions, Render resources, or paid
-  plans without explaining the effect and receiving approval.
-- Do not create a test issue or apply a label without the user's approval.
-- Stop at every **Human checkpoint** until the user confirms completion.
+- Use the Node.js version in `.node-version`.
 - Preserve unrelated working-tree changes.
+- Do not guess repository install or verification commands.
+- Do not weaken App permissions or security checks to make setup pass.
+- Ask before committing, pushing, creating paid resources, changing external
+  settings, creating issues, or applying labels.
 
-## Phase 1: Inspect and preflight
+## Phase 1: Preflight
 
-### Agent action
-
-Confirm the current directory is the Software Factory root and inspect:
+Confirm that the current directory is the software-factory root. Inspect:
 
 - `.node-version`;
 - `package.json`;
 - `factory.config.ts`;
 - `render.yaml`;
 - `.env.example`; and
-- the current Git status.
+- Git status.
 
 Run:
 
@@ -74,27 +58,13 @@ npm ci
 npm run check
 ```
 
-### Pass condition
+Continue only when the pinned Node version is active, dependencies install,
+checks pass, and unrelated changes are accounted for. Do not replace a failed
+`npm ci` with a lockfile-changing install.
 
-- Node satisfies the pinned project version.
-- Dependencies install successfully.
-- Lint, type checking, and tests pass.
-- Existing unrelated changes have been identified and left untouched.
+## Phase 2: Configure repositories
 
-### Recovery
-
-- Wrong Node version: install or select the version in `.node-version`, then
-  rerun the phase.
-- `npm ci` failure: report the failing command and relevant error; do not
-  replace it with a lockfile-changing install.
-- Existing test failure: distinguish it from changes made during setup before
-  continuing.
-
-## Phase 2: Configure one repository
-
-### Agent action
-
-Edit `factory.config.ts` so `repos` contains the intended targets:
+Replace the example `repos` entry in `factory.config.ts`:
 
 ```typescript
 repos: {
@@ -106,16 +76,17 @@ repos: {
 },
 ```
 
-Rules:
+Requirements:
 
-- The key must be the exact GitHub `owner/name`.
-- `baseBranch` must already exist.
-- `install` must be deterministic and must not change tracked files.
-- `verify` must contain the commands required before publishing. Use an empty
-  list only when skipping command-based verification is intentional.
+- use the exact GitHub `owner/name`;
+- name an existing base branch;
+- use an install command that is deterministic and leaves tracked files
+  unchanged; and
+- list every command required before publishing.
 
-Keep the default labels, permission, limits, and Sandbox timeout unless the
-user requested a change.
+Use `verify: []` only when the user explicitly wants no command-based
+verification. Keep the default labels, permission, limits, and Sandbox timeout
+unless the user requested changes.
 
 Run:
 
@@ -124,46 +95,28 @@ npm run typecheck
 git diff --check
 ```
 
-### Pass condition
+Use [Configuration](../configuration.md) for field semantics.
 
-- Configuration parses and type-checks.
-- The diff contains only the intended repository and explicitly requested
-  behavior changes.
+## Phase 3: Publish the configured fork
 
-### Recovery
+Confirm that the Git remote points to the user's fork. Show the configuration
+diff and check results.
 
-Use [Configuration](../configuration.md) for field semantics. If install or
-verification commands are unknown, stop and ask the user; do not guess
-project-specific commands when the target repository does not establish
-them.
+### Human checkpoint: commit and push
 
-## Phase 3: Save the fork
+Ask the user to confirm:
 
-### Agent action
+- the destination fork and branch;
+- the configured repositories and commands; and
+- permission to commit and push, if not already granted.
 
-Confirm the repository remote points to the user's fork. Present the
-configuration diff and verification result.
-
-Commit and push only when the user has asked the agent to do so. The Render
-Blueprint must be able to read the committed configuration from the fork.
-
-### Human checkpoint: fork ownership and push
-
-The user must confirm:
-
-- the destination fork is correct;
-- the configuration is safe to deploy; and
-- the configured commit is available on the fork's deployment branch.
-
-### Pass condition
-
-The fork contains the intended `factory.config.ts` and `render.yaml`.
+Do not continue until the deployment branch on the fork contains the intended
+`factory.config.ts` and `render.yaml`. The Blueprint reads these files from
+that branch.
 
 ## Phase 4: Create the GitHub App
 
-### Agent action
-
-Install local dependencies if needed, then start the manifest flow:
+Start the GitHub App manifest flow:
 
 ```bash
 npm run setup:app -- --write-env
@@ -175,17 +128,12 @@ For an organization-owned App:
 npm run setup:app -- --org <organization> --write-env
 ```
 
-The command starts a local callback server and prints a browser URL. Keep it
-running while the user completes the checkpoint.
+Keep the command running while the user completes the browser flow.
 
 ### Human checkpoint: create the App
 
-Ask the user to:
-
-1. open the printed local URL;
-2. review the App name, repositories, permissions, and events;
-3. select **Create on GitHub**; and
-4. return when the command reports success.
+Ask the user to open the printed URL, review the manifest, and select
+**Create on GitHub**.
 
 The manifest requests:
 
@@ -193,17 +141,15 @@ The manifest requests:
 - Metadata: read; and
 - Issues, Issue comments, Pull requests, and Pushes events.
 
-It does not request Actions, Workflows, or Administration permission.
+It does not request GitHub Actions, GitHub Workflows, or Administration
+permission.
 
-### Agent verification
+After the callback completes, confirm that the command reports the App slug
+and ID, prints an installation URL, and writes these values to `.env`:
 
-Confirm the command:
-
-- reports the App slug and ID;
-- prints an installation URL;
-- writes `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and
-  `GITHUB_WEBHOOK_SECRET` to `.env`; and
-- exits successfully.
+- `GITHUB_APP_ID`;
+- `GITHUB_APP_PRIVATE_KEY`; and
+- `GITHUB_WEBHOOK_SECRET`.
 
 Verify that Git ignores the file:
 
@@ -211,186 +157,137 @@ Verify that Git ignores the file:
 git check-ignore .env
 ```
 
-Do not display `.env`.
+## Phase 5: Install the App
 
-### Pass condition
+### Human checkpoint: repository access
 
-The GitHub App exists, `.env` is ignored, and the three generated values are
-available locally without being exposed.
+Ask the user to open the installation URL and install the App on every
+repository in `factory.config.ts`. If an organization requires approval, wait
+for an owner to approve the installation.
 
-## Phase 5: Install the GitHub App
+Continue only after the user confirms access to every configured repository.
 
-### Human checkpoint: repository installation
+## Phase 6: Deploy the Blueprint
 
-Ask the user to open the installation URL printed by `setup:app` and install
-the App on every repository in `factory.config.ts`.
+[`render.yaml`](../../render.yaml) creates two paid resources in the
+`production` environment of a `software-factory` project:
 
-When organization approval is required, stop until an organization owner has
-approved the installation.
+- `factory-gateway`, a Starter web service in Oregon; and
+- `factory-workflows`, a Workflows service in Oregon.
 
-### Pass condition
+### Human checkpoint: resources and secrets
 
-The user confirms installation on every exact configured repository.
+Explain the resources and expected charges. Ask the user to create the
+Blueprint from the configured fork and branch.
 
-## Phase 6: Deploy the Render Blueprint
+Enter these values for `factory-gateway`:
 
-### Agent action
+- `GITHUB_WEBHOOK_SECRET`;
+- `RENDER_API_KEY`.
 
-Explain that [`render.yaml`](../../render.yaml) creates paid resources in
-Oregon:
+Enter these values for `factory-workflows`:
 
-- `factory-gateway`, a Starter web service; and
-- `factory-workflows`, a Workflows service.
+- `RENDER_API_KEY`;
+- `RENDER_WORKSPACE_ID`;
+- `GITHUB_APP_ID`;
+- `GITHUB_APP_PRIVATE_KEY`;
+- `ANTHROPIC_API_KEY`.
 
-The user should create the Blueprint from the configured fork and deployment
-branch.
+The workspace ID starts with `tea-`. Copy GitHub values from local `.env`
+without showing them in chat or command output.
 
-### Human checkpoint: paid resources and secrets
+Continue when both services have deployed and the gateway is live.
 
-Before creation, ask the user to confirm the resources and expected charges.
-Then ask them to enter every `sync: false` value in the Render Dashboard.
+## Phase 7: Configure GitHub
 
-For `factory-gateway`:
-
-- `GITHUB_WEBHOOK_SECRET`
-- `RENDER_API_KEY`
-
-For `factory-workflows`:
-
-- `RENDER_API_KEY`
-- `RENDER_WORKSPACE_ID`
-- `GITHUB_APP_ID`
-- `GITHUB_APP_PRIVATE_KEY`
-- `ANTHROPIC_API_KEY`
-
-The user should copy GitHub values from the local `.env` without pasting them
-into chat. The Render workspace ID starts with `tea-`.
-
-### Pass condition
-
-Both services are created, the gateway reports live, and the Workflows
-service has deployed successfully.
-
-### Recovery
-
-- Blank `sync: false` field: set the missing value and redeploy.
-- Build failure: inspect the failing service's build log before changing
-  configuration.
-- Port or health failure: confirm the gateway binds to `0.0.0.0:$PORT` and
-  serves `/ready`.
-
-Use [Operations](../operations.md#troubleshoot) for service-specific failures.
-
-## Phase 7: Connect the webhook and create labels
-
-### Agent action
-
-Ask the user for the public gateway URL; this URL is not a secret. Run:
+Ask for the public gateway URL. It is not a secret. Run:
 
 ```bash
 npm run setup:github -- \
   --gateway-url https://<gateway>.onrender.com
 ```
 
-The command reads GitHub credentials from `.env`. It is idempotent and should:
+The command:
 
-- set the App webhook URL to
+- sets the App webhook URL to
   `https://<gateway>.onrender.com/webhooks/github`;
-- preserve the generated webhook secret; and
-- create `factory:triage`, `factory:spec-approved`,
-  `factory:pr-review`, and `factory:working` in each configured repository.
+- preserves the generated webhook secret; and
+- creates `factory:triage`, `factory:spec-approved`,
+  `factory:pr-review`, and `factory:working`.
 
-### Pass condition
-
-The command exits successfully and reports no failed repository or webhook
-operation.
-
-### Recovery
-
-- Missing credentials: confirm `setup:app --write-env` completed and `.env`
-  exists without printing it.
-- Repository failure: confirm exact `owner/name`, App installation, and the
-  installing user's repository administration access.
-- Wrong gateway URL: use the public HTTPS URL for `factory-gateway`, without
-  adding `/webhooks/github`; the command adds the path.
+It is safe to rerun. Continue only when it reports no failed repository or
+webhook operation.
 
 ## Phase 8: Activate the webhook
 
-GitHub's API does not allow `setup:github` to activate an App webhook.
+`setup:github` cannot activate an App webhook through GitHub's API.
 
 ### Human checkpoint: webhook activation
 
-Ask the user to:
+Ask the user to open the App's **Webhook** settings, confirm that the URL ends
+in `/webhooks/github`, enable **Active**, and save without changing the secret.
 
-1. open the GitHub App settings;
-2. open **Webhook**;
-3. verify the URL ends in `/webhooks/github`;
-4. enable **Active**; and
-5. save without changing the URL or secret.
+## Phase 9: Run `doctor`
 
-### Pass condition
+`doctor` checks the environment in which it runs. It is read-only and does
+not print secret values.
 
-The user confirms the webhook is active.
+### Gateway
 
-## Phase 9: Verify the deployed services
-
-Run `doctor` inside each service's Render Shell so it reads that service's
-deployed environment.
-
-### Human checkpoint or agent action with Render access
-
-In `factory-gateway`:
+Run this in the `factory-gateway` Render Shell:
 
 ```bash
 npm run doctor -- --service gateway
 ```
 
-In `factory-workflows`:
+This checks the gateway's deployed environment.
+
+### Workflows
+
+Workflows services have no Shell. Run `doctor` locally with the values used by
+`factory-workflows`.
+
+Local `.env` already contains the GitHub App values. Ask the user to add:
+
+- `RENDER_API_KEY`;
+- `RENDER_WORKSPACE_ID`;
+- `ANTHROPIC_API_KEY`; and
+- `RENDER_WORKFLOW_SLUG`.
+
+Use the deployed workflow slug, including any suffix Render added. Copy the
+exact value from `factory-gateway`'s deployed `RENDER_WORKFLOW_SLUG` into
+local `.env`.
+
+Run:
 
 ```bash
 npm run doctor -- --service workflows
 ```
 
-`doctor` is read-only and does not print secret values.
-
-### Pass condition
-
-Both commands exit successfully with every required check passing.
-
-### Recovery
-
-- Gateway failure: check webhook secret, Render API key, and workflow slug.
-- Workflows failure: check Render workspace ID, Render API key, GitHub App
-  credentials, provider key, and registered tasks.
-- App failure: compare required permissions and events with Phase 4.
-- Label or installation failure: rerun `npm run setup:github` after fixing
-  App access.
-
-Do not proceed to the smoke test while either service fails `doctor`.
+The warning `no webhook deliveries yet, so the hook may be inactive` is
+expected before the smoke test. Do not continue while either command has a
+failed check.
 
 ## Phase 10: Smoke-test Triage
 
-### Human checkpoint: external write
+### Human checkpoint: issue and label
 
-Ask permission before creating an issue or modifying labels. Use a small,
-disposable issue in a configured test repository.
-
-Suggested issue:
+Ask before creating an issue or changing labels. Use a disposable issue in a
+configured test repository:
 
 ```text
-Title: Software Factory setup smoke test
+Title: software-factory setup smoke test
 
 Confirm the repository can be inspected and return a minimal specification.
 Do not request a code change.
 ```
 
-Create the issue and apply `factory:triage`. This can be done in GitHub or,
-when the user has approved CLI writes:
+After approval, create and label it in GitHub or with `gh`:
 
 ```bash
 gh issue create \
   --repo <owner/name> \
-  --title "Software Factory setup smoke test" \
+  --title "software-factory setup smoke test" \
   --body "Confirm the repository can be inspected and return a minimal specification. Do not request a code change."
 
 gh issue edit <number> \
@@ -398,25 +295,102 @@ gh issue edit <number> \
   --add-label factory:triage
 ```
 
-The first run may take several minutes while it builds the repository
-snapshot.
+The first run may spend several minutes building the repository snapshot.
 
-### Pass condition
+The smoke test passes when:
 
-- The issue receives an App-authored status comment.
-- `factory:working` appears while the task is running.
-- Triage ends with questions, a specification, or an intentional decline.
-- The status comment includes the final outcome or a useful failure.
+- the issue receives an App-authored status comment;
+- `factory:working` appears while the task runs;
+- Triage ends with questions, a specification, or an intentional decline;
+  and
+- the status comment shows the final outcome or a useful failure.
 
-If the status comment never appears, use
-[Operations](../operations.md#no-status-comment).
+Optionally confirm that the Workflows logs contain `run.finished`:
 
-## Phase 11: Handoff
+```bash
+render logs -r <factory-workflows-id> --text run.finished
+```
 
-Report setup using this format without including secrets:
+## Troubleshooting setup
+
+### A service does not deploy
+
+- For a missing `sync: false` value, set it and redeploy.
+- For a build failure, inspect the failing service's build log before changing
+  configuration.
+- For a gateway health failure, confirm that it binds to `0.0.0.0:$PORT` and
+  serves `/ready`.
+
+### `doctor` fails
+
+- Gateway: check the webhook secret, Render API key, and workflow slug.
+- Workflows: check the workspace ID, Render API key, App credentials,
+  provider key, and registered tasks.
+- `No tasks found`: use the deployed workflow slug, not an assumed service
+  name.
+- App or label failure: fix App access and rerun `npm run setup:github`.
+
+### No status comment appears
+
+Open the App's **Advanced** settings and inspect **Recent Deliveries**.
+
+- No delivery: activate the webhook and verify its URL.
+- `401`: GitHub and `factory-gateway` have different webhook secrets.
+- `422`: inspect the gateway log entry
+  `authenticated delivery produced an invalid task input`.
+- `502`: inspect `could not start task`; then check `RENDER_API_KEY`,
+  `RENDER_WORKFLOW_SLUG`, and the Workflows deployment.
+- `200` with `{"ignored":"<reason>"}`: the event did not start a task. Common
+  reasons are `unconfigured repo`, `unhandled label`, `issue not in triage`,
+  `bot sender`, `pull request not open`, and `not base branch`.
+- `202`: the task started; inspect it under `factory-workflows`.
+
+If a task starts but the comment says it did not run, the triggering actor
+lacks `minimumPermission`.
+
+### A snapshot build fails
+
+Inspect the `refresh-snapshot` run or the first task run. Check the install
+command, tracked-file changes after install, App installation, and Sandbox
+verification.
+
+### An agent submits an invalid result
+
+The runner accepts three attempts. Search Workflows logs for the last schema
+errors and submitted field names:
+
+```bash
+render logs -r <factory-workflows-id> --text invalid_submission
+```
+
+Repeated errors for one agent usually require a prompt or schema change.
+
+### An agent cannot start
+
+Check the selected provider key on `factory-workflows`, then run:
+
+```bash
+npm run doctor -- --service workflows
+```
+
+### Publishing refuses a change
+
+Inspect the task logs. Publishing rejects workflow files, unsafe paths,
+symlinks, submodules, file-count and file-size limits, branches with human
+commits, and candidate trees GitHub cannot reproduce by SHA.
+
+### The status comment remains on `running`
+
+Post `/factory cancel` as the first line of a comment. This clears stale
+status and terminates the recorded Sandbox. Reapplying the trigger label
+starts a new run.
+
+## Handoff
+
+Report:
 
 ```text
-Software Factory setup: complete
+software-factory setup: complete
 
 Fork: <URL>
 Configured repositories: <owner/name, ...>
@@ -430,17 +404,8 @@ Local uncommitted changes: <none or summary>
 Follow-up actions: <none or explicit list>
 ```
 
-If any success criterion is missing, report setup as **incomplete** and name
-the exact checkpoint, evidence, and next action.
+If any required check is missing, report setup as **incomplete**. Name the
+failed phase, evidence, and next action.
 
-## Ready to extend
-
-After setup:
-
-- add or change repositories, labels, models, and limits through
-  [Configuration](../configuration.md);
-- diagnose live behavior through [Operations](../operations.md);
-- read [Architecture](../architecture.md) before changing authority,
-  credentials, coordination, or publishing; and
-- use [Contributing](../../CONTRIBUTING.md) to add agents, tasks, and GitHub
-  triggers.
+For later changes, use [Configuration](../configuration.md) or the
+[extension runbook](extend.md).

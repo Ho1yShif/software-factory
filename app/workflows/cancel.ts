@@ -11,10 +11,14 @@ type CancelGitHub = StatusGitHub & Pick<GitHubClient, "getPermission">;
 interface CancelResult {
 	cancelled: boolean;
 	runId?: string;
-	reason?: "permission_denied" | "nothing_running";
+	reason?: "permission_denied" | "nothing_running" | "already_stopped";
 }
 
-/** `/factory cancel`: stops the run the status comment names, if it's still active, and terminates its sandbox. */
+/**
+ * `/factory cancel`: stops the run the status comment names, if it's still active, and terminates its sandbox. A
+ * comment that still says "running" for a run that already stopped (it was killed before it could finish) is
+ * marked cancelled too, so the stale status and working label don't linger.
+ */
 export async function cancelRun(
 	ctx: Pick<TaskContext, "metadata">,
 	raw: unknown,
@@ -36,14 +40,15 @@ export async function cancelRun(
 		}
 		const current = await readStatus(gh, input.number);
 		const stop = { repo: repo.fullName, subject: event.subject, by: runId, outcome: "cancelled" } as const;
-		if (!current || !(await stopRun(deps.runs ?? workflowRuns(), current.data, stop))) {
+		const active = current ? await stopRun(deps.runs ?? workflowRuns(), current.data, stop) : false;
+		if (!current || (!active && current.data.state !== "running")) {
 			await gh.createComment(input.number, `@${input.actor} no factory run is in progress here.`);
 			return { cancelled: false, reason: "nothing_running" };
 		}
-		const { runId: cancelled, stage, title } = current.data;
-		const summary = `cancelled by @${input.actor}.`;
-		await finishStatus({ gh, number: input.number, runId: cancelled, task: stage, title: title ?? stage, state: "cancelled", summary });
-		return { cancelled: true, runId: cancelled };
+		const { runId: stopped, stage, title } = current.data;
+		const summary = active ? `cancelled by @${input.actor}.` : `cleared by @${input.actor}; the run had already stopped without finishing.`;
+		await finishStatus({ gh, number: input.number, runId: stopped, task: stage, title: title ?? stage, state: "cancelled", summary });
+		return active ? { cancelled: true, runId: stopped } : { cancelled: false, runId: stopped, reason: "already_stopped" };
 	})();
 
 	emit({ ...event, type: "run.finished", payload: { stage: TASKS.cancel, state: "done", ...result } });

@@ -27,7 +27,7 @@ export function buildManifest(opts: { name: string; redirectUrl: string }): Mani
 	return {
 		name: opts.name,
 		url: HOMEPAGE,
-		description: "Software Factory: labeled issue to spec to draft PR to review, on Render.",
+		description: "software-factory: labeled issue to spec to draft PR to review, on Render.",
 		hook_attributes: { url: PLACEHOLDER_WEBHOOK_URL, active: false },
 		redirect_url: opts.redirectUrl,
 		public: false,
