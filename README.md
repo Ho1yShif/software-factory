@@ -1,14 +1,20 @@
 # software-factory
 
-software-factory turns GitHub issues into specifications and verified draft
-pull requests. It also reviews pull requests. Labels start the three main
-tasks; comments and base-branch pushes handle cancellation, follow-up Triage,
-and snapshot refresh. The factory never approves or merges code.
+software-factory is an extensible template for building GitHub-native coding
+workflows on Render. It includes a complete issue-to-PR workflow that you can
+run as-is, change one agent at a time, or use as the foundation for different
+automations.
 
-It runs in your Render workspace as a web service, a Workflows service, and
-short-lived Render Sandboxes.
+The template provides the infrastructure common to agent workflows:
 
-## How it works
+- a signed-webhook gateway;
+- durable Render Workflows tasks with cancellation and run ownership;
+- short-lived Render Sandboxes for repository code and model-directed tools;
+- typed agent inputs and outputs;
+- GitHub App authentication and artifact markers; and
+- validated publishing that keeps write credentials outside Sandboxes.
+
+## Included workflow
 
 ```text
 issue --factory:triage--> specification
@@ -25,7 +31,27 @@ pull request --factory:pr-review--> COMMENT review
 
 GitHub holds the discussion, labels, specifications, pull requests, and
 reviews. Render Workflows runs the tasks. Sandboxes contain the checkout,
-agent loop, and model-directed tools.
+agent loop, and model-directed tools. The included workflow never approves or
+merges code.
+
+## Extend the template
+
+The built-in agents and tasks are examples of the template's extension model:
+
+- Add or replace an agent with a Markdown prompt, a model tier, a bounded Zod
+  output schema, and the minimum tools it needs.
+- Add a claiming task for work attached to an issue or pull request.
+- Add a plain Workflows task for maintenance or other work without a GitHub
+  claim.
+- Route new GitHub events, labels, or commands through the authenticated
+  gateway.
+- Change repositories, verification commands, models, permissions, and limits
+  in `factory.config.ts`.
+
+The Sandbox runner, claim lifecycle, GitHub client, formatting helpers, and
+publishing boundary are reusable building blocks. Start with the
+[extension runbook](docs/runbooks/extend.md), which covers the required files,
+tests, authority rules, deploys, and snapshot refreshes.
 
 ## Set up
 
