@@ -1,9 +1,8 @@
 # software-factory
 
-software-factory is an extensible template for building GitHub-native coding
+software-factory is an extensible template for building GitHub-native coding agent
 workflows on Render. It includes a complete issue-to-PR workflow that you can
-run as-is, change one agent at a time, or use as the foundation for different
-automations.
+run, change, or use as the foundation for your own automations.
 
 Start by [forking this repository](https://github.com/render-examples/software-factory/fork).
 Deploy from your fork: its `factory.config.ts` defines the repositories the
