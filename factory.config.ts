@@ -39,10 +39,9 @@ export function defineFactoryConfig(config: FactoryConfig): FactoryConfig {
 
 export default defineFactoryConfig({
 	repos: {
-		"render-examples/render-factory-example-target": {
+		"Ho1yShif/sandbox": {
 			baseBranch: "main",
-			install: "npm ci",
-			verify: ["npm run build", "npm test"],
+			verify: [],
 		},
 	},
 	labels: {
